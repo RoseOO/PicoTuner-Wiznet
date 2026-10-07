@@ -68,15 +68,17 @@ add_executable(${TARGET_NAME}
 # -fcommon behaviour. Newer GCC defaults to -fno-common, so restore it.
 target_compile_options(${TARGET_NAME} PRIVATE -fcommon)
 
+# NOTE: the LongMynd-derived sources contain UB that modern GCC exploits at
+# -O1 and above (verified on both rp2040 and rp2350): it treats an
+# ethernet_setup() wait loop as non-terminating and deletes mainloop() and
+# core1_main().  Force -O0 so every variant links a complete binary.
+target_compile_options(${TARGET_NAME} PRIVATE -O0)
+
 # RP2040 builds use the LongMynd WinterHill memory map (retained MY_RAM_0 in
 # SCRATCH_Z). RP2350 (Pico 2) uses the SDK default linker; MY_RAM_0 is defined
 # in picotunewh.c in .uninitialized_data instead.
 if(PICO_PLATFORM MATCHES "^rp2350")
     message(STATUS "Target: ${PICO_BOARD} / ${WIZNET_CHIP} (RP2350, SDK default linker)")
-    # NOTE: -O1..-O3 make GCC (rp2350, -mcmse) treat the ethernet_setup() wait
-    # loops as non-terminating and delete mainloop()/core1_main() (latent UB in
-    # the LongMynd-derived sources). -O0 is used until that is tracked down.
-    target_compile_options(${TARGET_NAME} PRIVATE -O0)
 else()
     message(STATUS "Target: ${PICO_BOARD} / ${WIZNET_CHIP} (RP2040, custom linker)")
     pico_set_linker_script(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/memmap_custom-2MB.ld)

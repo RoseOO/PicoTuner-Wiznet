@@ -1648,12 +1648,10 @@ int __in_flash("my_group_name") main()
 
 int get_link_state()
 {
-#if (_WIZCHIP_ == W6100)
-	return ((getPHYSR() & PHYSR_LNK) ? 1 : 0) ;
+#if (_WIZCHIP_ == W5500)
+	return ((getPHYCFGR() & PHYCFGR_LNK_ON) ? 1 : 0) ;
 #else
-	uint8_t	link = 0 ;
-	ctlwizchip (CW_GET_PHYLINK, (void*)&link) ;
-	return (link ? 1 : 0) ;
+	return ((getPHYSR() & PHYSR_LNK) ? 1 : 0) ;
 #endif
 }
 
