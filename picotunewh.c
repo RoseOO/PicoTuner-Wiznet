@@ -201,7 +201,15 @@
 
 #define ZLED				ILED					// use external LED
 
+// MY_RAM_0 holds settings that must survive a warm reset (base IP port, TS flash).
+// On RP2040 the custom linker script places it in retained SCRATCH_Z.  On RP2350
+// there is no SCRATCH_Z, so define it here in the retained .uninitialized_data
+// section (not zeroed by crt0, contents survive a watchdog/system reset).
+#if defined(PICO_RP2350)
+	volatile	uint32				MY_RAM_0 [64] __attribute__((section(".uninitialized_data.ptwh"), retain, used)) ;
+#else
 extern  volatile     		uint32	MY_RAM_0 [64] ;
+#endif
 #define	RAM_BIP				2
 #define	RAM_TSFLASH			4
 #define DEFAULT_BIP			9900
@@ -863,6 +871,7 @@ static void pt_wizchip_write (uint8_t wb)
 	spi_write_blocking (SPI_PORT, &wb, 1) ;
 }
 
+#if (_WIZCHIP_ == W6100)
 static void pt_wizchip_read_buf (uint8_t* rx, datasize_t len)
 {
 	spi_read_blocking (SPI_PORT, 0xFF, rx, len) ;
@@ -872,11 +881,16 @@ static void pt_wizchip_write_buf (uint8_t* tx, datasize_t len)
 {
 	spi_write_blocking (SPI_PORT, tx, len) ;
 }
+#endif
 
 void wizchip_initialize_ewj (void)
 {
 #if (_WIZCHIP_ == W6100)
 	uint8_t memsize [2] [8] = { {2, 4, 4, 2, 1, 1, 1, 1}, {2, 4, 4, 2, 1, 1, 1, 1} } ;
+#elif (_WIZCHIP_ == W5500)
+	uint8_t memsize [2] [8] = { {2, 2, 2, 2, 2, 2, 2, 2}, {2, 2, 2, 2, 2, 2, 2, 2} } ;
+#else
+	uint8_t memsize [2] [8] = { {2, 2, 2, 2, 2, 2, 2, 2}, {2, 2, 2, 2, 2, 2, 2, 2} } ;
 #endif
 
 	reg_wizchip_cs_cbfunc (pt_wizchip_select, pt_wizchip_deselect) ;
@@ -1634,7 +1648,13 @@ int __in_flash("my_group_name") main()
 
 int get_link_state()
 {
+#if (_WIZCHIP_ == W6100)
 	return ((getPHYSR() & PHYSR_LNK) ? 1 : 0) ;
+#else
+	uint8_t	link = 0 ;
+	ctlwizchip (CW_GET_PHYLINK, (void*)&link) ;
+	return (link ? 1 : 0) ;
+#endif
 }
 
 
@@ -4161,6 +4181,7 @@ int __in_flash("my_group_name") ethernet_setup()
 	}
    
 	ethernet_ready = 1 ;
+	return (0) ;
 }
 
 

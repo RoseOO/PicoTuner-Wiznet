@@ -11,6 +11,16 @@
 #include "hardware/watchdog.h"
 ///#include "tusb.h"
 
+// W5500/W5100S expose NETLOCK()/NETUNLOCK() from their chip headers; the W5500
+// has a single register bank so no net-lock is needed.  Provide no-op fallbacks
+// for any chip that does not define them.
+#if !defined(NETLOCK)
+#define NETLOCK()
+#endif
+#if !defined(NETUNLOCK)
+#define NETUNLOCK()
+#endif
+
 #include <time.h>
 
 #include "hardware/pio.h"

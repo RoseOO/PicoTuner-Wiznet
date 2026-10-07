@@ -16,9 +16,17 @@ if(NOT DEFINED PORT_DIR)
     set(PORT_DIR ${CMAKE_CURRENT_LIST_DIR}/../WIZnet-PICO-C/port)
 endif()
 
-# Select the WIZnet chip and board
-add_definitions(-D_WIZCHIP_=W6100)
-add_definitions(-DDEVICE_BOARD_NAME=W6100_EVB_PICO)
+# Select the Raspberry Pi Pico board / platform.
+#   pico            -> RP2040 (W5100S/W5500/W6100-EVB-Pico)
+#   pico2           -> RP2350 (W5100S/W5500/W6100-EVB-Pico2)
+set(PICO_BOARD "pico2" CACHE STRING "Pico board: pico (RP2040) or pico2 (RP2350)")
+
+# Select the WIZnet chip and board (name must match board_list.h)
+set(WIZNET_CHIP  "W5500"           CACHE STRING "WIZnet chip: W5100S/W5500/W6100")
+set(WIZNET_BOARD "W5500_EVB_PICO2" CACHE STRING "WIZnet board name from board_list.h")
+
+add_definitions(-D_WIZCHIP_=${WIZNET_CHIP})
+add_definitions(-DDEVICE_BOARD_NAME=${WIZNET_BOARD})
 
 # Pull in the Raspberry Pi Pico SDK
 if(NOT DEFINED PICO_SDK_PATH)
@@ -33,6 +41,8 @@ pico_sdk_init()
 
 set(TARGET_NAME picotunewh)
 
+string(TOLOWER ${WIZNET_CHIP} WIZNET_CHIP_LC)
+
 add_executable(${TARGET_NAME}
         ${TARGET_NAME}.c
         nim.c
@@ -43,10 +53,10 @@ add_executable(${TARGET_NAME}
         stv6120_utils.c
         stvvglna.c
         stvvglna_utils.c
-        # WIZnet ioLibrary_Driver (W6100)
+        # WIZnet ioLibrary_Driver (chip selected by WIZNET_CHIP)
         ${WIZNET_DIR}/Ethernet/socket.c
         ${WIZNET_DIR}/Ethernet/wizchip_conf.c
-        ${WIZNET_DIR}/Ethernet/W6100/w6100.c
+        ${WIZNET_DIR}/Ethernet/${WIZNET_CHIP}/${WIZNET_CHIP_LC}.c
         # WIZnet Pico port layer
         ${PORT_DIR}/ioLibrary_Driver/src/wizchip_spi.c
         ${PORT_DIR}/ioLibrary_Driver/src/wizchip_gpio_irq.c
@@ -58,14 +68,26 @@ add_executable(${TARGET_NAME}
 # -fcommon behaviour. Newer GCC defaults to -fno-common, so restore it.
 target_compile_options(${TARGET_NAME} PRIVATE -fcommon)
 
-pico_set_linker_script(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/memmap_custom-2MB.ld)
+# RP2040 builds use the LongMynd WinterHill memory map (retained MY_RAM_0 in
+# SCRATCH_Z). RP2350 (Pico 2) uses the SDK default linker; MY_RAM_0 is defined
+# in picotunewh.c in .uninitialized_data instead.
+if(PICO_PLATFORM MATCHES "^rp2350")
+    message(STATUS "Target: ${PICO_BOARD} / ${WIZNET_CHIP} (RP2350, SDK default linker)")
+    # NOTE: -O1..-O3 make GCC (rp2350, -mcmse) treat the ethernet_setup() wait
+    # loops as non-terminating and delete mainloop()/core1_main() (latent UB in
+    # the LongMynd-derived sources). -O0 is used until that is tracked down.
+    target_compile_options(${TARGET_NAME} PRIVATE -O0)
+else()
+    message(STATUS "Target: ${PICO_BOARD} / ${WIZNET_CHIP} (RP2040, custom linker)")
+    pico_set_linker_script(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/memmap_custom-2MB.ld)
+endif()
 
 pico_generate_pio_header(${TARGET_NAME} ${CMAKE_CURRENT_LIST_DIR}/${TARGET_NAME}.pio)
 
 target_include_directories(${TARGET_NAME} PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         ${WIZNET_DIR}/Ethernet
-        ${WIZNET_DIR}/Ethernet/W6100
+        ${WIZNET_DIR}/Ethernet/${WIZNET_CHIP}
         ${WIZNET_DIR}/Internet/DHCP
         ${WIZNET_DIR}/Internet/DNS
         ${PORT_DIR}
@@ -90,3 +112,5 @@ pico_enable_stdio_usb(${TARGET_NAME} 1)
 pico_enable_stdio_uart(${TARGET_NAME} 0)
 
 pico_add_extra_outputs(${TARGET_NAME})
+
+

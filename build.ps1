@@ -1,13 +1,17 @@
 <#
     PicoTuner-WH  -  Windows build script
     ------------------------------------
-    Configures (if needed) and builds the PicoTuner-WH firmware for the
-    WIZnet W6100-EVB-Pico using CMake + Ninja + the ARM GNU toolchain.
+    Configures (if needed) and builds the PicoTuner-WH firmware using
+    CMake + Ninja + the ARM GNU toolchain.
 
     Usage:
         powershell -ExecutionPolicy Bypass -File .\build.ps1
         powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean
         powershell -ExecutionPolicy Bypass -File .\build.ps1 -Configure
+
+    The target board defaults come from CMakeLists.txt (this branch builds the
+    W5500-EVB-Pico2 / RP2350).  Override per-invocation, e.g.:
+        .\build.ps1 -PicoBoard pico -WiznetChip W6100 -WiznetBoard W6100_EVB_PICO -BuildDir build-w6100
 
     Any of these may be overridden via environment variables:
         PICO_SDK_PATH   - Raspberry Pi Pico SDK
@@ -18,14 +22,18 @@
 
 [CmdletBinding()]
 param(
-    [switch]$Clean,        # delete the build directory and reconfigure from scratch
-    [switch]$Configure     # only configure, do not build
+    [switch]$Clean,                          # delete the build directory and reconfigure from scratch
+    [switch]$Configure,                      # only configure, do not build
+    [string]$BuildDir    = 'build',          # build directory name
+    [string]$PicoBoard,                      # pico (RP2040) / pico2 (RP2350)
+    [string]$WiznetChip,                     # W5100S / W5500 / W6100
+    [string]$WiznetBoard                     # board name from board_list.h
 )
 
 $ErrorActionPreference = 'Stop'
 
 $Root    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Build   = Join-Path $Root 'build'
+$Build   = Join-Path $Root $BuildDir
 $SrcParent = Split-Path -Parent $Root
 
 function Resolve-Tool {
@@ -85,11 +93,16 @@ if ($Clean -and (Test-Path -LiteralPath $Build)) {
 $cache = Join-Path $Build 'CMakeCache.txt'
 if (-not (Test-Path -LiteralPath $cache)) {
     Write-Host "Configuring ..." -ForegroundColor Yellow
-    & $Cmake -S $Root -B $Build -G Ninja `
-        "-DCMAKE_MAKE_PROGRAM=$Ninja" `
-        "-DPICO_SDK_PATH=$env:PICO_SDK_PATH" `
-        "-DWIZNET_DIR=$env:WIZNET_DIR" `
+    $cfg = @(
+        "-DCMAKE_MAKE_PROGRAM=$Ninja",
+        "-DPICO_SDK_PATH=$env:PICO_SDK_PATH",
+        "-DWIZNET_DIR=$env:WIZNET_DIR",
         "-DPORT_DIR=$env:PORT_DIR"
+    )
+    if ($PicoBoard)   { $cfg += "-DPICO_BOARD=$PicoBoard" }
+    if ($WiznetChip)  { $cfg += "-DWIZNET_CHIP=$WiznetChip" }
+    if ($WiznetBoard) { $cfg += "-DWIZNET_BOARD=$WiznetBoard" }
+    & $Cmake -S $Root -B $Build -G Ninja @cfg
     if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)." }
 }
 
