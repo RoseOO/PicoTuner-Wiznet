@@ -1,0 +1,70 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+	
+// PicoTuneWH NIM serial mode
+
+// TS1 output from the NIM - this is from tuner 2 in the NIM, due to a physical crossover between tuner and demodulator
+// Receive 1 serial data bit at a time from a NIM and send to the main cpu in 32 bit words
+// The bytes will be in reverse order, but the DMA transfer will correct this
+// Should be a packet of 188 x 8 bits, sampling on the falling clock, framed by SS/VALID low, but stop when the SS/VALID input from the NIM goes high
+// Clock goes high coincident with SS high/low and only runs when SS/VALID is active (low)
+
+
+// MiniTiouner standard byte mode
+
+// TS2 output from the NIM - this is from tuner 1 in the NIM, due to a physical crossover between tuner and demodulator
+// Receive 8 parallel data bits at a time from a NIM and send to the main cpu in 32 bit words
+// The bytes will be in reverse order, but the DMA transfer will correct this
+// Should be a packet of 188 bytes, sampling on the rising clock, framed by SS/VALID high, but stop when the SS/VALID input from the NIM goes low
+// Clock goes low coincident with SS high/low and runs continually
+
+
+// all the .defines must appear before the first program
+
+.define public  NIMDAT_RX1           	8
+.define public  NIMCLK_RX1           	9		
+.define public	NIMSS_RX1				10
+.define public  EXECCTRL_JMP_PIN_RX1 	NIMSS_RX1
+.define public	BASEPIN_RX1          	NIMDAT_RX1	
+
+.define public	NIMDAT_RX1_INDEX		(NIMDAT_RX1-BASEPIN_RX1)
+.define public	NIMCLK_RX1_INDEX		(NIMCLK_RX1-BASEPIN_RX1)
+.define public	NIMSS_RX1_INDEX			(NIMSS_RX1-BASEPIN_RX1)
+
+
+// WinterHill serial mode
+
+.program RX_pio
+    wait    0           pin        NIMSS_RX1_INDEX     	// wait for SS/VALID going low
+    wait    1           pin        NIMSS_RX1_INDEX      // wait for SS/VALID going high to synchronise   
+waitforSS1:
+    wait    0           pin        NIMSS_RX1_INDEX      // wait for SS/VALID going low   
+waitforclock1:
+    wait    0           pin        NIMCLK_RX1_INDEX     // wait for clock low
+    in      pins        1                              	// read the 1 input bit into the bottom bit of the ISR
+    wait    1           pin        NIMCLK_RX1_INDEX     // wait for clock high
+    jmp     pin         waitforSS1                     	// SS has gone high - wait for next packet (EXECCTRL_JMP_PIN)
+    jmp     waitforclock1
+ 
+// set up for WH serial mode
+
+% c-sdk {
+    static inline void RX_pio_program_init (PIO pio, uint sm, uint programoffset, uint basepin, uint execpinindex)
+    {
+        pio_sm_config           myconfig ;
+        myconfig                = RX_pio_program_get_default_config (programoffset) ;
+        sm_config_set_fifo_join (&myconfig, PIO_FIFO_JOIN_RX) ;         // tx fifo not needed, so use the spac$
+        sm_config_set_in_shift  (&myconfig, false, true, 32) ;          // shift left, autopush, threshold 32
+        sm_config_set_clkdiv    (&myconfig, (float) 1) ;                // run at system clock speed / 2
+        sm_config_set_in_pins   (&myconfig, basepin) ;                  // set the input base pin
+        sm_config_set_jmp_pin   (&myconfig, execpinindex) ;             // set the EXECCTRL jump pin
+        pio_sm_set_consecutive_pindirs (pio, sm, basepin, 3, false) ;   // Set the pins to input at the PIO
+        pio_sm_init             (pio, sm, programoffset, &myconfig);    // Load our configuration, and jump to$
+        pio_sm_set_enabled      (pio, sm, false) ;                      // initially disabled
+    }
+%}
+
+
