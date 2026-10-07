@@ -358,6 +358,7 @@ volatile	uint8				inhibit_lmprint ;
 volatile	uint8				ethernet_ready ; 						// set when an IP address has been set
 
 volatile	uint32				freechainempty ;
+volatile	uint32				core1heartbeat ;						// incremented by core1 each loop; used for watchdog liveness
 	
             char        		baseinterfaceaddress	[16] ;
             char				baseipaddress 			[16] ;       	// the IP address   for all I/O
@@ -971,6 +972,7 @@ int __in_flash("my_group_name") main()
 	xsr10.status 		= 0 ;
 	terminate 			= 0 ;
 	freechainempty 		= 0 ;
+	core1heartbeat		= 0 ;
 
 // set up gpio
 	
@@ -1622,7 +1624,11 @@ int __in_flash("my_group_name") main()
 	RX_pio_program_init (rcv[1].piogroup, rcv[1].piosm, rcv[1].piooffset, BASEPIN_R1, EXECPIN_R1_INDEX) ;	// Configure the PIO program
 	RX_pio_program_init (rcv[2].piogroup, rcv[2].piosm, rcv[2].piooffset, BASEPIN_R2, EXECPIN_R2_INDEX) ;	// Configure the PIO program
 	printf ("DEBUG: PIO configured, calling mainloop()\r\n") ;
-	
+
+// arm the hardware watchdog: if the main loop stops feeding it (hang or hard
+// fault on either core) the chip resets instead of sitting dead.
+	watchdog_enable (4000, true) ;						// 4s timeout, pause while debugging
+
 	mainloop() ;
 }
 
@@ -1861,6 +1867,25 @@ void mainloop()
 
 	while (1)
     { 
+		watchdog_update() ;									// kick the hardware watchdog
+
+// core1 liveness: if core1 stops running (hang or hard fault) stop feeding the
+// watchdog so the hardware resets the whole chip.
+		{
+			static uint32 core1checktime = 0 ;
+			static uint32 lastheartbeat   = 0 ;
+			if (monotime_ms() - core1checktime >= 2000)
+			{
+				core1checktime = monotime_ms() ;
+				if (core1heartbeat == lastheartbeat)
+				{
+					printf ("DEBUG: core1 heartbeat lost - forcing reset\r\n") ;
+					while (1) ;							// stop feeding; watchdog will reset
+				}
+				lastheartbeat = core1heartbeat ;
+			}
+		}
+
 		static uint32 dbg_hb = 0 ;
 		if (monotime_ms() - dbg_hb >= 5000)
 		{
@@ -2046,7 +2071,6 @@ void mainloop()
 		if (maxr)
 		{
 			rx = maxr ;
-			if (freechainempty == 0)
 			{				
 				dma_interrupts_off() ; 									// avoid chaining conflicts
 				packetblockptr = getfromchain (&rcv[rx].rxchain) ;		// get the first block in the chain	
@@ -2075,6 +2099,7 @@ void mainloop()
 
 				dma_interrupts_off() ;
 				addtochain (&freechain, packetblockptr) ;				// free the packet block
+				freechainempty = 0 ;									// pool has recovered; clear the exhausted latch
 				dma_interrupts_on() ;
 			}
 		}
@@ -4151,6 +4176,8 @@ void core1_main()
 
 	while (1)
 	{	
+		core1heartbeat++ ;									// core1 liveness counter for the watchdog
+
 		static uint32 dbg_c1 = 0 ;
 		if (monotime_ms() - dbg_c1 >= 2000)
 		{
