@@ -3374,11 +3374,41 @@ void __not_in_flash_func (mydma_handler) ()
 }
 
 
+// search a DHCP options buffer for a given option code; returns a pointer to
+// the option (type byte) or 0 if not found.  Handles the PAD (0) and END (255)
+// options, unlike the original byte-walk which assumed option 53 came first.
+uint8* dhcp_find_option (uint8* p, uint8* end, uint8 code)
+{
+	while (p < end)
+	{
+		if (*p == 255)							// END option
+		{
+			break ;
+		}
+		if (*p == 0)							// PAD option
+		{
+			p++ ;
+			continue ;
+		}
+		if ((p + 1) >= end)						// truncated
+		{
+			break ;
+		}
+		if (*p == code)
+		{
+			return (p) ;
+		}
+		p += p[1] + 2 ;
+	}
+	return (0) ;
+}
+
+
 int dhcp_scheduler (int command)
 {
 	int			status ;
 	char		buff   [512] ;
-	
+
 	dhcp_current_time = monotime_ms() ;
 
 	if (monotime_ms() - last_broadcast_time >= 1000)
@@ -3637,31 +3667,35 @@ int dhcp_waiting_offer_state_2 (int command)
 
 // check for a valid DHCP offer to us
 
-		if 
-		(
-			memcmp (dhcpdisc.bootp_flags, dhcpoffer.bootp_flags, 2) == 0		&&
-			memcmp (dhcpdisc.mac2, dhcpoffer.mac2, MAC_SIZE) == 0 				&&
-			memcmp (dhcpdisc.transaction_id, dhcpoffer.transaction_id, 4) == 0 	&&
-			memcmp (dhcpdisc.magic_cookie, dhcpoffer.magic_cookie, 4) == 0		&&
-			dhcpoffer.options[0] == DHCP_MESSAGE_TYPE 							&& 
-			dhcpoffer.options[2] == DHCP_MESSAGE_OFFER
-		)
 		{
-			memcpy (netinfo.rx, received_address, 4) ;			// the address making the offer
-			memset (temps, 0, sizeof(temps)) ;
-						
-			p = dhcpoffer.options ;
-			while (*p != 255 && (int) p < (int) &dhcpoffer.end_packet)
-			{
-				switch (p[0])
-				{
-					default: break ;
-				} ;
-				p += p[1] + 2 ;
-			}
+			uint8* mt  = dhcp_find_option ((uint8*)&dhcpoffer.options[0], (uint8*)&dhcpoffer.end_packet, DHCP_MESSAGE_TYPE) ;
+			uint8* sid = dhcp_find_option ((uint8*)&dhcpoffer.options[0], (uint8*)&dhcpoffer.end_packet, DHCP_MESSAGE_SERVER) ;
 
-			if (dhcp_debug)
+			if 
+			(
+				memcmp (dhcpdisc.bootp_flags, dhcpoffer.bootp_flags, 2) == 0		&&
+				memcmp (dhcpdisc.mac2, dhcpoffer.mac2, MAC_SIZE) == 0 				&&
+				memcmp (dhcpdisc.transaction_id, dhcpoffer.transaction_id, 4) == 0 	&&
+				memcmp (dhcpdisc.magic_cookie, dhcpoffer.magic_cookie, 4) == 0		&&
+				mt && mt[1] >= 1 && mt[2] == DHCP_MESSAGE_OFFER
+			)
 			{
+				memcpy (netinfo.rx, received_address, 4) ;			// the address making the offer
+// capture the server identifier (option 54) so that the REQUEST can be sent to
+// the correct server as required by RFC 2131 in the SELECTING state.  Without
+// this, some servers (notably with a static/reserved lease) do not ACK a
+// broadcast REQUEST.  Fall back to the packet source address if absent.
+				if (sid && sid[1] == 4)
+				{
+					memcpy (netinfo.sv, sid + 2, 4) ;
+				}
+				else
+				{
+					memcpy (netinfo.sv, received_address, 4) ;
+				}
+
+				if (dhcp_debug)
+				{
 				printf ("DHCP: OFFER of ") ;
 				for (x = 0 ; x < 4 ; x++)
 				{
@@ -3685,6 +3719,7 @@ int dhcp_waiting_offer_state_2 (int command)
 			}
 			dhcp_machine_state = DHCP_SENDING_REQUEST_STATE_7 ;
 			return (0) ;
+		}
 		}
 	}
 
@@ -3725,6 +3760,11 @@ int dhcp_sending_request_state_7 (int command)
 	*p++ = 4 ;								// length
 	memcpy (p, dhcpoffer.your_ip, 4) ;		// offered ip address
 	p += 4 ;		
+
+	*p++ = DHCP_MESSAGE_SERVER ;			// server identifier (option 54)
+	*p++ = 4 ;								// length
+	memcpy (p, netinfo.sv, 4) ;				// the server that made the offer
+	p += 4 ;
 
 	*p++ = DHCP_MESSAGE_HOSTNAME ;
 	*p++ = sizeof (dhcprequest.host_name) ;								// length
@@ -3783,16 +3823,20 @@ int dhcp_waiting_ack_state_3 (int command)
 	status = recvfrom (dhcp_socket, (void*)&dhcpack, sizeof(dhcpack), received_address, &received_port) ;
 	if (status > 0)
 	{
-		if 
-		(
-			memcmp (dhcpack.bootp_flags, dhcpdisc.bootp_flags, 2) == 0		&&
-			memcmp (dhcpack.mac2, dhcpdisc.mac2, MAC_SIZE) == 0				&&
-			memcmp (dhcpack.magic_cookie, dhcpdisc.magic_cookie, 4) == 0	&&
-			memcmp (received_address, netinfo.rx, 4) == 0					&&
-			dhcpack.options[0] == DHCP_MESSAGE_TYPE 					 					
-		)
 		{
-			if (dhcpack.options[2] == DHCP_MESSAGE_ACK)
+			uint8* mt = dhcp_find_option ((uint8*)&dhcpack.options[0], (uint8*)&dhcpack.end_packet, DHCP_MESSAGE_TYPE) ;
+
+			if 
+			(
+				memcmp (dhcpack.bootp_flags, dhcpdisc.bootp_flags, 2) == 0		&&
+				memcmp (dhcpack.mac2, dhcpdisc.mac2, MAC_SIZE) == 0				&&
+				memcmp (dhcpack.transaction_id, dhcpdisc.transaction_id, 4) == 0 &&
+				memcmp (dhcpack.magic_cookie, dhcpdisc.magic_cookie, 4) == 0	&&
+				memcmp (received_address, netinfo.rx, 4) == 0					&&
+				mt && mt[1] >= 1
+			)
+		{
+			if (mt[2] == DHCP_MESSAGE_ACK)
 			{
 				memset (message, 0, sizeof(message)) ;
 				memset (temps, 0, sizeof(temps)) ;
@@ -3804,7 +3848,7 @@ int dhcp_waiting_ack_state_3 (int command)
 						case DHCP_MESSAGE_GATEWAY: 		memcpy (&netinfo.gw, p+2, 4) 		; break ;
 						case DHCP_MESSAGE_DNS: 			memcpy (&netinfo.dns, p+2, 4) 		; break ;
 						case DHCP_MESSAGE_SUBNET: 		memcpy (&netinfo.sn, p+2, 4) 		; break ;
-						case DHCP_MESSAGE: 				strncpy (message, (p+2), p[1]) 		; break ;
+						case DHCP_MESSAGE: 				strncpy (message, (char*)(p+2), p[1] < sizeof(message)-1 ? p[1] : sizeof(message)-1) ; break ;
 						case DHCP_MESSAGE_SERVER: 		memcpy (&netinfo.sv, p+2, 4) ; 		; break ;
 						case DHCP_MESSAGE_LEASETIME:	memcpy (temps,p+2, 4) ; break ;
 						default: break ;
@@ -3836,7 +3880,7 @@ int dhcp_waiting_ack_state_3 (int command)
 				dhcp_machine_state 	= DHCP_OK_STATE_5 ;
 				return (DHCP_SUCCESS) ;				
 			}
-			else if (dhcpack.options[2] == DHCP_MESSAGE_NAK)
+			else if (mt[2] == DHCP_MESSAGE_NAK)
 			{
 				memset (message, 0, sizeof(message)) ;
 				p = dhcpack.options ;
@@ -3844,7 +3888,7 @@ int dhcp_waiting_ack_state_3 (int command)
 				{			
 					switch (p[0])
 					{
-						case DHCP_MESSAGE: strncpy (message, (p+2), p[1]) ; break ;
+						case DHCP_MESSAGE: strncpy (message, (char*)(p+2), p[1] < sizeof(message)-1 ? p[1] : sizeof(message)-1) ; break ;
 						default: break ;
 					} ;
 					p += p[1] + 2 ;
@@ -3874,6 +3918,7 @@ int dhcp_waiting_ack_state_3 (int command)
 				return (DHCP_FAIL) ;
 			}
 		}	
+		}
 	}
 
 	if (dhcp_current_time - dhcp_mark_time > 10000)
