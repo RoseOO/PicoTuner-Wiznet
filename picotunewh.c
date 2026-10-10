@@ -2015,7 +2015,7 @@ void mainloop()
 		if (monotime_ms() - dbg_hb >= 5000)
 		{
 			dbg_hb = monotime_ms() ;
-			printf ("DEBUG: mainloop alive, freechain=%d link=%d\r\n", freechain.count, dhcp_link_state) ;
+			if (dhcp_debug) printf ("DEBUG: mainloop alive, freechain=%d link=%d\r\n", freechain.count, dhcp_link_state) ;
 		}
 
     	if (reboot_request)
@@ -2391,6 +2391,13 @@ static int webui_api_get (const char *body, const char *key, char *out, int outl
 	return (0) ;
 }
 
+static const char *webui_api_inputname (int antenna)
+{
+	if (antenna == ANTENNA_UPPER) return ("X") ;		// top input == LNB/pol X
+	if (antenna == ANTENNA_LOWER) return ("Y") ;		// bottom input == LNB/pol Y
+	return ("-") ;
+}
+
 static const char *webui_api_state (uint8 s)
 {
 	switch (s)
@@ -2480,7 +2487,7 @@ void webui_status_json (char *out, int outlen)
 			"\"lna_gain\":%d,\"power_i\":%d,\"power_q\":%d,\"const_i\":%d,\"const_q\":%d,"
 			"\"ber\":%d,\"viterbi\":%d,\"ldpc_err\":%d,\"bch_err\":%d,\"bch_uncorr\":%d,\"puncture\":%d,"
 			"\"service\":\"%s\",\"provider\":\"%s\",\"null_pct\":%d,"
-			"\"packets\":%u,\"vlcstops\":%d,\"modechanges\":%d,\"ipchanges\":%d,\"antenna\":%d,"
+			"\"packets\":%u,\"vlcstops\":%d,\"modechanges\":%d,\"ipchanges\":%d,\"input\":\"%s\","
 			"\"ts\":\"%s\"}",
 			(rx == 1) ? "" : ",",
 			rx,
@@ -2517,7 +2524,7 @@ void webui_status_json (char *out, int outlen)
 			(int) rcv[rx].rawinfos [STATUS_VLCSTOPS],
 			(int) rcv[rx].rawinfos [STATUS_MODECHANGES],
 			(int) rcv[rx].rawinfos [STATUS_IPCHANGES],
-			(int) rcv[rx].antenna,
+			webui_api_inputname ((int) rcv[rx].antenna),
 			rcv[rx].textinfos [STATUS_TSDESTINATION]) ;
 	}
 	n += snprintf (out + n, outlen - n, "]}") ;
@@ -3508,10 +3515,9 @@ void setup_titlebar (char *output, uint32 rx)
 			sprintf (output+strlen(output), " %0.3fMHz", (float)rcv[rx].frequencies[0] / 1000) ;
 		}
 		
-// display antenna
-		
-		y = STATUS_ANTENNA ;
-		sprintf (output+strlen(output), " %c", rcv[rx].textinfos[y][0]) ;		
+// display antenna input (X = top, Y = bottom)
+
+		sprintf (output+strlen(output), " %s", webui_api_inputname ((int) rcv[rx].antenna)) ;
 
 // extra terminating zero		
 
@@ -4062,9 +4068,9 @@ int dhcp_scheduler (int command)
 			form_broadcast_message (zbuff) ;		
 			if (strlen(zbuff))
 			{
-				printf ("DEBUG: broadcast: calling sendto len=%d\r\n", strlen(zbuff)) ;
+				if (dhcp_debug) printf ("DEBUG: broadcast: calling sendto len=%d\r\n", strlen(zbuff)) ;
 				status = sendto (broadcast_socket, zbuff, strlen(zbuff) + 1, broadcast_address, PORTBROADCAST) ;
-				printf ("DEBUG: broadcast sent link=%d status=%d\r\n", dhcp_link_state, status) ;
+				if (dhcp_debug) printf ("DEBUG: broadcast sent link=%d status=%d\r\n", dhcp_link_state, status) ;
 			}	
 		}
 	}
@@ -4880,7 +4886,7 @@ void core1_main()
 		if (monotime_ms() - dbg_c1 >= 2000)
 		{
 			dbg_c1 = monotime_ms() ;
-			printf ("DEBUG: core1 loop alive\r\n") ;
+			if (dhcp_debug) printf ("DEBUG: core1 loop alive\r\n") ;
 		}
 
 		info_loop() ;							
@@ -6289,7 +6295,7 @@ static	uint32			counter ;
 		sprintf (output+strlen(output), "----------------") ;
 		sprintf (output+strlen(output), "\r\n") ;
 
-		if (dhcp_success == 0 || dhcp_debug)
+		if ((netinfo.dhcp == NETINFO_DHCP && dhcp_success == 0) || dhcp_debug)
 		{
 			return (0) ;
 		}
