@@ -45,6 +45,8 @@ string(TOLOWER ${WIZNET_CHIP} WIZNET_CHIP_LC)
 
 add_executable(${TARGET_NAME}
         ${TARGET_NAME}.c
+        config.c
+        webui.c
         nim.c
         rpi2c.c
         stv0910.c
@@ -105,6 +107,7 @@ target_link_libraries(${TARGET_NAME} PRIVATE
         hardware_pio
         hardware_exception
         hardware_flash
+        pico_flash
         pico_multicore
         hardware_irq
         hardware_clocks

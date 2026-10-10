@@ -79,6 +79,8 @@
 #define ON		1
 
 #include "globals.h"
+#include "config.h"
+#include "webui.h"
 #include "pico/unique_id.h"
 #include "picotunewh.pio.h"
 #include "errno.h"
@@ -88,6 +90,7 @@
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
+#include "pico/multicore.h"
 
 /*
     Default operation for baseipport = 9900 
@@ -813,6 +816,7 @@ static 		void 			repeating_timer_callback    (void) ;
 
 			int				ethernet_setup				(void) ;
 			void			mainloop					(void) ;
+			void			webui_lnb_autostart			(void) ;
 
 			int 			dhcp_scheduler 						(int) ;
 			int 			dhcp_idle_state_0					(int) ;
@@ -981,6 +985,25 @@ int __in_flash("my_group_name") main()
 
 	stdio_init_all() ;
 	stdio_flush() ;
+
+// load persistent settings and apply the network parts before ethernet_setup()
+
+	config_load () ;
+
+	netinfo.dhcp = devconfig.dhcp ? NETINFO_DHCP : NETINFO_STATIC ;
+	if (netinfo.dhcp == NETINFO_STATIC)
+	{
+		memcpy (netinfo.ip,  devconfig.ip,  4) ;
+		memcpy (netinfo.sn,  devconfig.sn,  4) ;
+		memcpy (netinfo.gw,  devconfig.gw,  4) ;
+		memcpy (netinfo.dns, devconfig.dns, 4) ;
+	}
+	if (devconfig.hostname [0])
+	{
+		memset (dhcpdisc.host_name_fixed, 0, sizeof(dhcpdisc.host_name_fixed)) ;
+		strncpy ((char*) dhcpdisc.host_name_fixed, devconfig.hostname, sizeof(dhcpdisc.host_name_fixed)) ;
+	}
+	dhcp_debug = devconfig.debug_dhcp ;
 
 	inhibit_lmprint 	= 0 ;
 	xsr10.status 		= 0 ;
@@ -1323,7 +1346,7 @@ int __in_flash("my_group_name") main()
 		}
 	}
 
-	baseipport = DEFAULT_BIP ;
+	baseipport = devconfig.baseipport ? devconfig.baseipport : DEFAULT_BIP ;
 	if (MY_RAM_0 [RAM_BIP + 1] == 123456789)
 	{
 		baseipport = (MY_RAM_0 [RAM_BIP + 0] & ~1) & 0xffff ;
@@ -1343,6 +1366,10 @@ int __in_flash("my_group_name") main()
 	if (MY_RAM_0 [RAM_TSFLASH + 1] == 123456789)
 	{
 		tsflash_value = MY_RAM_0 [RAM_TSFLASH + 0] ;
+	}
+	else
+	{
+		tsflash_value = devconfig.tsflash ;
 	}
 
 	xprintf ("\r\n") ;
@@ -1940,6 +1967,17 @@ void mainloop()
     { 
 		watchdog_update() ;									// kick the hardware watchdog
 
+// apply the saved LNB power state once, after the command path is live
+
+		{
+			static int lnb_autostart_done = 0 ;
+			if (!lnb_autostart_done)
+			{
+				lnb_autostart_done = 1 ;
+				webui_lnb_autostart () ;
+			}
+		}
+
 // core1 liveness: if core1 stops running (hang or hard fault) stop feeding the
 // watchdog so the hardware resets the whole chip.
 		{
@@ -2015,6 +2053,7 @@ void mainloop()
 
 		inicommand_loop() ;													// send ini commands one by one
 		status = dhcp_scheduler (4) ;
+		webui_poll () ;														// serve the HTTP configuration server
 		
 		if (freechainempty > 1)
 		{
@@ -2291,6 +2330,299 @@ void mainloop()
     	   	}
        	}	               
     }	
+}
+
+
+//********************************************************************************************************
+//  Web configuration/control API - application side (transport is in webui.c)
+//********************************************************************************************************
+
+static void webui_api_ipstr (char *out, const uint8 *ip)
+{
+	sprintf (out, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]) ;
+}
+
+static int webui_api_ipset (uint8 *ip, const char *s)
+{
+	int a, b, c, d ;
+	if (sscanf (s, "%d.%d.%d.%d", &a, &b, &c, &d) != 4) return (0) ;
+	if (a < 0 || a > 255 || b < 0 || b > 255 || c < 0 || c > 255 || d < 0 || d > 255) return (0) ;
+	ip[0] = a ; ip[1] = b ; ip[2] = c ; ip[3] = d ;
+	return (1) ;
+}
+
+static int webui_api_get (const char *body, const char *key, char *out, int outlen)
+{
+	const char *p = body ;
+	int			klen = (int) strlen (key) ;
+
+	while ((p = strstr (p, key)) != 0)
+	{
+		if ((p == body || p[-1] == '&' || p[-1] == '?') && p[klen] == '=')
+		{
+			int i = 0 ;
+			p += klen + 1 ;
+			while (*p && *p != '&' && i < outlen - 1)
+			{
+				out[i++] = (*p == '+') ? ' ' : *p ;
+				p++ ;
+			}
+			out[i] = 0 ;
+			return (1) ;
+		}
+		p += klen ;
+	}
+	return (0) ;
+}
+
+static const char *webui_api_state (uint8 s)
+{
+	switch (s)
+	{
+		case STATE_DEMOD_S2:			return ("DVB-S2") ;
+		case STATE_DEMOD_S:				return ("DVB-S") ;
+		case STATE_DEMOD_FOUND_HEADER:	return ("header") ;
+		case STATE_SEARCH:				return ("search") ;
+		case STATE_LOST:				return ("lost") ;
+		case STATE_TIMEOUT:				return ("timeout") ;
+		case STATE_IDLE:				return ("idle") ;
+		default:						return ("?") ;
+	}
+}
+
+static const char *webui_api_lnbtoken (int state)
+{
+	switch (state)
+	{
+		case LNB_OFF:		return ("OFF") ;
+		case LNB_13V:		return ("LO") ;
+		case LNB_18V:		return ("HI") ;
+		case LNB_13V_22K:	return ("LOT") ;
+		case LNB_18V_22K:	return ("HIT") ;
+		default:			return ("OFF") ;
+	}
+}
+
+// queue a WinterHill command to core 1 (same channel as the UDP commands)
+
+static int webui_api_queue (const char *cmd, int rx)
+{
+	uint32 start = monotime_ms () ;
+
+	while (tur01e.status == 1)
+	{
+		if (monotime_ms () - start > 250) return (-1) ;
+		sleep_ms (1) ;
+	}
+	memset (&tur01e, 0, sizeof(tur01e)) ;
+	strncpy ((char*) tur01e.buffer, cmd, sizeof(tur01e.buffer) - 1) ;
+	tur01e.receiver = rx ;
+	if (rx == 0)
+		tur01e.receivedonport = (baseipport / 100) * 100 + PORTLISTENBASE ;
+	else
+		tur01e.receivedonport = baseipport + PORTLISTENBASE + rx ;
+	tur01e.status = 1 ;
+	return (0) ;
+}
+
+void webui_status_json (char *out, int outlen)
+{
+	char sip [16], ssn [16], sgw [16], sdns [16], smac [20] ;
+	int  n = 0, rx ;
+
+	webui_api_ipstr (sip,  netinfo.ip) ;
+	webui_api_ipstr (ssn,  netinfo.sn) ;
+	webui_api_ipstr (sgw,  netinfo.gw) ;
+	webui_api_ipstr (sdns, netinfo.dns) ;
+	sprintf (smac, "%02X:%02X:%02X:%02X:%02X:%02X",
+		netinfo.mac[0], netinfo.mac[1], netinfo.mac[2], netinfo.mac[3], netinfo.mac[4], netinfo.mac[5]) ;
+
+	n += snprintf (out + n, outlen - n,
+		"{\"version\":\"ptwh%s%s%s\",\"uptime\":%u,"
+		"\"mac\":\"%s\",\"ip\":\"%s\",\"sn\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
+		"\"dhcp\":%d,\"dhcp_status\":\"%s\",\"baseipport\":%u,\"link\":%d,"
+		"\"lnb_x\":{\"present\":%d,\"state\":\"%s\"},"
+		"\"lnb_y\":{\"present\":%d,\"state\":\"%s\"},\"rx\":[",
+		VERSIONX, VERSIONX2, versionx3L,
+		(unsigned)(monotime_ms () / 1000),
+		smac, sip, ssn, sgw, sdns,
+		(netinfo.dhcp == NETINFO_DHCP) ? 1 : 0,
+		dhcp_status_message,
+		(unsigned) baseipport,
+		get_link_state (),
+		vgxpresent ? 1 : 0,
+		rcv[0].textinfos [STATUS_VGX_STATE][0] ? rcv[0].textinfos [STATUS_VGX_STATE] : "-",
+		vgypresent ? 1 : 0,
+		rcv[0].textinfos [STATUS_VGY_STATE][0] ? rcv[0].textinfos [STATUS_VGY_STATE] : "-") ;
+
+	for (rx = 1 ; rx <= MAXRECEIVERS ; rx++)
+	{
+		n += snprintf (out + n, outlen - n,
+			"%s{\"id\":%d,\"nim\":\"%s\",\"active\":%d,\"state\":\"%s\",\"lock\":%d,"
+			"\"freq\":%.3f,\"lo\":%.3f,\"sr\":%u,\"mer\":\"%s\",\"modcod\":\"%s\",\"packets\":%u}",
+			(rx == 1) ? "" : ",",
+			rx,
+			rcv[rx].nimtype,
+			rcv[rx].active,
+			webui_api_state (rcv[rx].scanstate),
+			(rcv[rx].scanstate == STATE_DEMOD_S2 || rcv[rx].scanstate == STATE_DEMOD_S) ? 1 : 0,
+			(float) rcv[rx].requestedfreq / 1000.0f,
+			(float) rcv[rx].requestedloc  / 1000.0f,
+			rcv[rx].symbolrates[0],
+			rcv[rx].textinfos [STATUS_MER],
+			rcv[rx].textinfos [STATUS_MODCOD],
+			(unsigned) rcv[rx].packetcountrx) ;
+	}
+	n += snprintf (out + n, outlen - n, "]}") ;
+}
+
+void webui_config_json (char *out, int outlen)
+{
+	char sip [16], ssn [16], sgw [16], sdns [16] ;
+
+	webui_api_ipstr (sip,  devconfig.ip) ;
+	webui_api_ipstr (ssn,  devconfig.sn) ;
+	webui_api_ipstr (sgw,  devconfig.gw) ;
+	webui_api_ipstr (sdns, devconfig.dns) ;
+
+	snprintf (out, outlen,
+		"{\"dhcp\":%d,\"ip\":\"%s\",\"sn\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
+		"\"hostname\":\"%s\",\"baseipport\":%u,\"tsflash\":%d,\"debug_dhcp\":%d,"
+		"\"lnb_x\":%d,\"lnb_y\":%d,\"lnb_autostart\":%d}",
+		devconfig.dhcp ? 1 : 0, sip, ssn, sgw, sdns,
+		devconfig.hostname, (unsigned) devconfig.baseipport,
+		devconfig.tsflash ? 1 : 0, devconfig.debug_dhcp ? 1 : 0,
+		devconfig.lnb_x, devconfig.lnb_y, devconfig.lnb_autostart ? 1 : 0) ;
+}
+
+int webui_apply_config (const char *body, int len, char *msg, int msglen)
+{
+	char val [64] ;
+	int  i ;
+
+	(void) len ;
+
+	if (webui_api_get (body, "dhcp", val, sizeof(val)))
+	{
+		devconfig.dhcp = (atoi (val) != 0) ? 1 : 0 ;
+	}
+	if (webui_api_get (body, "ip", val, sizeof(val)) && !webui_api_ipset (devconfig.ip, val))
+	{
+		snprintf (msg, msglen, "invalid IP address") ; return (-1) ;
+	}
+	if (webui_api_get (body, "sn", val, sizeof(val)) && !webui_api_ipset (devconfig.sn, val))
+	{
+		snprintf (msg, msglen, "invalid subnet mask") ; return (-1) ;
+	}
+	if (webui_api_get (body, "gw", val, sizeof(val)) && !webui_api_ipset (devconfig.gw, val))
+	{
+		snprintf (msg, msglen, "invalid gateway") ; return (-1) ;
+	}
+	if (webui_api_get (body, "dns", val, sizeof(val)) && !webui_api_ipset (devconfig.dns, val))
+	{
+		snprintf (msg, msglen, "invalid DNS") ; return (-1) ;
+	}
+	if (webui_api_get (body, "hostname", val, sizeof(val)))
+	{
+		for (i = 0 ; val[i] && i < CONFIG_HOSTNAME_MAX - 1 ; i++)
+		{
+			if (!isalnum (val[i]) && val[i] != '-' && val[i] != '_') val[i] = '-' ;
+		}
+		val[i] = 0 ;
+		if (val[0]) strncpy (devconfig.hostname, val, CONFIG_HOSTNAME_MAX - 1) ;
+	}
+	if (webui_api_get (body, "baseipport", val, sizeof(val)))
+	{
+		int b = atoi (val) ;
+		if (b != 0 && (b < 1100 || b > 65400 || (b % 100) > 14 || (b & 1)))
+		{
+			snprintf (msg, msglen, "invalid base IP port") ; return (-1) ;
+		}
+		devconfig.baseipport = b ;
+	}
+	if (webui_api_get (body, "tsflash", val, sizeof(val)))     devconfig.tsflash       = atoi (val) ? 1 : 0 ;
+	if (webui_api_get (body, "debug_dhcp", val, sizeof(val)))  devconfig.debug_dhcp    = atoi (val) ? 1 : 0 ;
+	if (webui_api_get (body, "lnb_x", val, sizeof(val)))       devconfig.lnb_x         = atoi (val) ;
+	if (webui_api_get (body, "lnb_y", val, sizeof(val)))       devconfig.lnb_y         = atoi (val) ;
+	if (webui_api_get (body, "lnb_autostart", val, sizeof(val))) devconfig.lnb_autostart = atoi (val) ? 1 : 0 ;
+
+	if (config_save () != 0)
+	{
+		snprintf (msg, msglen, "flash write failed") ; return (-1) ;
+	}
+
+	reboot_request = 2 ;						// reboot (keeping settings) to apply
+	snprintf (msg, msglen, "saved - rebooting") ;
+	return (0) ;
+}
+
+int webui_set_lnb (int rx, int state, char *msg, int msglen)
+{
+	char cmd [24] ;
+	const char *tok = webui_api_lnbtoken (state) ;
+
+	if (rx != 1 && rx != 2)               { snprintf (msg, msglen, "invalid receiver") ; return (-1) ; }
+	if (rx == 1 && !vgxpresent)           { snprintf (msg, msglen, "LNB X not present") ; return (-1) ; }
+	if (rx == 2 && !vgypresent)           { snprintf (msg, msglen, "LNB Y not present") ; return (-1) ; }
+
+	snprintf (cmd, sizeof(cmd), "[to@wh] %s=%s", (rx == 1) ? "VGX" : "VGY", tok) ;
+
+	if (webui_api_queue (cmd, 0) != 0)    { snprintf (msg, msglen, "busy, try again") ; return (-1) ; }
+
+	if (rx == 1) devconfig.lnb_x = state ; else devconfig.lnb_y = state ;
+	snprintf (msg, msglen, "LNB %d set to %s", rx, tok) ;
+	return (0) ;
+}
+
+int webui_tune (int rx, int freq, int sr, int lo, char fplug, char *msg, int msglen)
+{
+	char cmd [96] ;
+
+	if (rx != 1 && rx != 2)          { snprintf (msg, msglen, "invalid receiver") ; return (-1) ; }
+	if (freq != 0 && freq < 100000)  { snprintf (msg, msglen, "invalid frequency") ; return (-1) ; }
+	if (sr < 125 || sr > 45000)      { snprintf (msg, msglen, "invalid symbol rate") ; return (-1) ; }
+	if (fplug != 'A' && fplug != 'B') fplug = 'A' ;
+
+	snprintf (cmd, sizeof(cmd), "[to@wh] rcv=%d freq=%d offset=%d srate=%d fplug=%c",
+		rx, freq, lo, sr, fplug) ;
+
+	if (webui_api_queue (cmd, rx) != 0) { snprintf (msg, msglen, "busy, try again") ; return (-1) ; }
+
+	snprintf (msg, msglen, "tuning RX%d to %d kHz", rx, freq) ;
+	return (0) ;
+}
+
+int webui_reboot (int mode, char *msg, int msglen)
+{
+	if (mode == 1)
+	{
+		MY_RAM_0 [RAM_BIP + 1]     = 0 ;
+		MY_RAM_0 [RAM_TSFLASH + 1] = 0 ;
+		config_defaults () ;
+		config_save () ;
+		snprintf (msg, msglen, "settings reset - rebooting") ;
+		reboot_request = 2 ;
+	}
+	else if (mode == 2)
+	{
+		snprintf (msg, msglen, "entering BOOTSEL") ;
+		reboot_request = 3 ;
+	}
+	else
+	{
+		snprintf (msg, msglen, "rebooting") ;
+		reboot_request = 2 ;
+	}
+	return (0) ;
+}
+
+void webui_lnb_autostart (void)
+{
+	char msg [64] ;
+
+	if (!devconfig.lnb_autostart) return ;
+	if (vgxpresent) webui_set_lnb (1, devconfig.lnb_x, msg, sizeof(msg)) ;
+	if (vgypresent) webui_set_lnb (2, devconfig.lnb_y, msg, sizeof(msg)) ;
 }
 
 
@@ -4238,6 +4570,7 @@ int __in_flash("my_group_name") ethernet_setup()
 	}
    
 	ethernet_ready = 1 ;
+	webui_init () ;								// start the HTTP configuration server
 	return (0) ;
 }
 
@@ -4255,6 +4588,8 @@ volatile	uint32			thenms ;
 void core1_main()
 {
 	printf ("DEBUG: core1_main() entered\r\n") ;
+
+	multicore_lockout_victim_init () ;			// allow core 0 to lock us out for flash writes
 
 	int				x ;
 	int				y ;
