@@ -772,6 +772,22 @@ volatile	uint16				piorunning ;					// !0 when active
 			packetblock_t 		tur01e ;						// tuning requests from Core0 to Core1
 			packetblock_t		xsr10 ;							// used by Core1 to send to Core0
 			packetblock_t*		turp ;							// used by tuning command processor	
+
+// register-access RPC: Core0 (web UI) requests an I2C register read/write which
+// Core1 performs, since all NIM I2C traffic must stay on Core1.
+
+typedef struct
+{
+	volatile uint32		status ;		// 0 = idle, 1 = request, 2 = done
+	volatile uint8		dev ;			// 0 = STV0910, 1 = STV6120, 2 = STVVGLNA
+	volatile uint8		rw ;			// 0 = read, 1 = write
+	volatile uint8		addr ;			// STVVGLNA i2c address
+	volatile uint16		reg ;			// register address
+	volatile uint8		val ;			// write value / read result
+	volatile int8		err ;			// error code (0 = ok)
+} nimrpc_t ;
+
+volatile nimrpc_t	nimrpc ;
 		 	
 
 //@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
@@ -2459,7 +2475,13 @@ void webui_status_json (char *out, int outlen)
 	{
 		n += snprintf (out + n, outlen - n,
 			"%s{\"id\":%d,\"nim\":\"%s\",\"active\":%d,\"state\":\"%s\",\"lock\":%d,"
-			"\"freq\":%.3f,\"lo\":%.3f,\"sr\":%u,\"mer\":\"%s\",\"modcod\":\"%s\",\"packets\":%u}",
+			"\"freq\":%.3f,\"lo\":%.3f,\"hardwarefreq\":%.3f,\"sr\":%u,\"sr_full\":%d,"
+			"\"mer\":\"%s\",\"mer_raw\":%d,\"modcod\":\"%s\",\"rolloff\":%d,\"frame\":%d,\"pilots\":%d,"
+			"\"lna_gain\":%d,\"power_i\":%d,\"power_q\":%d,\"const_i\":%d,\"const_q\":%d,"
+			"\"ber\":%d,\"viterbi\":%d,\"ldpc_err\":%d,\"bch_err\":%d,\"bch_uncorr\":%d,\"puncture\":%d,"
+			"\"service\":\"%s\",\"provider\":\"%s\",\"null_pct\":%d,"
+			"\"packets\":%u,\"vlcstops\":%d,\"modechanges\":%d,\"ipchanges\":%d,\"antenna\":%d,"
+			"\"ts\":\"%s\"}",
 			(rx == 1) ? "" : ",",
 			rx,
 			rcv[rx].nimtype,
@@ -2468,10 +2490,35 @@ void webui_status_json (char *out, int outlen)
 			(rcv[rx].scanstate == STATE_DEMOD_S2 || rcv[rx].scanstate == STATE_DEMOD_S) ? 1 : 0,
 			(float) rcv[rx].requestedfreq / 1000.0f,
 			(float) rcv[rx].requestedloc  / 1000.0f,
+			(float) rcv[rx].hardwarefreq  / 1000.0f,
 			rcv[rx].symbolrates[0],
+			(int) rcv[rx].rawinfos [STATUS_SYMBOL_RATE_FULL],
 			rcv[rx].textinfos [STATUS_MER],
+			(int) rcv[rx].rawinfos [STATUS_MER],
 			rcv[rx].textinfos [STATUS_MODCOD],
-			(unsigned) rcv[rx].packetcountrx) ;
+			(int) rcv[rx].rawinfos [STATUS_ROLLOFF],
+			(int) rcv[rx].rawinfos [STATUS_FRAME_TYPE],
+			(int) rcv[rx].rawinfos [STATUS_PILOTS],
+			(int) rcv[rx].rawinfos [STATUS_LNA_GAIN],
+			(int) rcv[rx].rawinfos [STATUS_POWER_I],
+			(int) rcv[rx].rawinfos [STATUS_POWER_Q],
+			(int) rcv[rx].rawinfos [STATUS_CONSTELLATION_I],
+			(int) rcv[rx].rawinfos [STATUS_CONSTELLATION_Q],
+			(int) rcv[rx].rawinfos [STATUS_BER],
+			(int) rcv[rx].rawinfos [STATUS_VITERBI_ERROR_RATE],
+			(int) rcv[rx].rawinfos [STATUS_ERRORS_LDPC_COUNT],
+			(int) rcv[rx].rawinfos [STATUS_ERRORS_BCH_COUNT],
+			(int) rcv[rx].rawinfos [STATUS_ERRORS_BCH_UNCORRECTED],
+			(int) rcv[rx].rawinfos [STATUS_PUNCTURE_RATE],
+			rcv[rx].textinfos [STATUS_SERVICE_NAME],
+			rcv[rx].textinfos [STATUS_SERVICE_PROVIDER_NAME],
+			(int) rcv[rx].rawinfos [STATUS_TS_NULL_PERCENTAGE],
+			(unsigned) rcv[rx].packetcountrx,
+			(int) rcv[rx].rawinfos [STATUS_VLCSTOPS],
+			(int) rcv[rx].rawinfos [STATUS_MODECHANGES],
+			(int) rcv[rx].rawinfos [STATUS_IPCHANGES],
+			(int) rcv[rx].antenna,
+			rcv[rx].textinfos [STATUS_TSDESTINATION]) ;
 	}
 	n += snprintf (out + n, outlen - n, "]}") ;
 }
@@ -2623,6 +2670,137 @@ void webui_lnb_autostart (void)
 	if (!devconfig.lnb_autostart) return ;
 	if (vgxpresent) webui_set_lnb (1, devconfig.lnb_x, msg, sizeof(msg)) ;
 	if (vgypresent) webui_set_lnb (2, devconfig.lnb_y, msg, sizeof(msg)) ;
+}
+
+
+//********************************************************************************************************
+//  NIM register access (marshalled to Core1) and named tuner/LNA controls
+//********************************************************************************************************
+
+static int nimrpc_xfer (int dev, int rw, int addr, int reg, uint8 *val)
+{
+	uint32	start = monotime_ms () ;
+
+	while (nimrpc.status == 1)
+	{
+		if (monotime_ms () - start > 200) return (-1) ;
+		sleep_ms (1) ;
+	}
+	nimrpc.dev    = (uint8)  dev ;
+	nimrpc.rw     = (uint8)  rw ;
+	nimrpc.addr   = (uint8)  addr ;
+	nimrpc.reg    = (uint16) reg ;
+	if (rw != 0) nimrpc.val = *val ;
+	nimrpc.err    = 0 ;
+	nimrpc.status = 1 ;
+
+	start = monotime_ms () ;
+	while (nimrpc.status != 2)
+	{
+		if (monotime_ms () - start > 500) { nimrpc.status = 0 ; return (-1) ; }
+		sleep_ms (1) ;
+	}
+	if (val) *val = nimrpc.val ;
+	nimrpc.status = 0 ;
+	return (nimrpc.err) ;
+}
+
+int webui_reg_read (int dev, int addr, int reg, int *val)
+{
+	uint8 v = 0 ;
+	int   e = nimrpc_xfer (dev, 0, addr, reg, &v) ;
+	if (val) *val = v ;
+	return (e) ;
+}
+
+int webui_reg_write (int dev, int addr, int reg, int val)
+{
+	uint8 v = (uint8) val ;
+	return (nimrpc_xfer (dev, 1, addr, reg, &v)) ;
+}
+
+int webui_nim_control (const char *body, int len, char *msg, int msglen)
+{
+	char	val [32] ;
+	int		cur = 0, rx = 1, lna_addr = NIM_LNA_0_ADDR ;
+	int		done = 0 ;
+
+	(void) len ;
+
+	if (webui_api_get (body, "rx", val, sizeof(val)))
+	{
+		rx = atoi (val) ;
+	}
+
+// STV6120: RF input select (CTRL9 RFSEL, 0=RFA 1=RFB 2=RFC 3=RFD)
+	if (webui_api_get (body, "input", val, sizeof(val)))
+	{
+		int in = atoi (val) ;
+		if (in < 0 || in > 3)                       { snprintf (msg, msglen, "input must be 0..3") ; return (-1) ; }
+		if (webui_reg_read (1, 0, STV6120_CTRL9, &cur) != 0) { snprintf (msg, msglen, "tuner read failed") ; return (-1) ; }
+		if (rx == 2)
+			cur = (cur & ~STV6120_CTRL9_RFSEL_2_MASK) | ((in << STV6120_CTRL9_RFSEL_2_SHIFT) & STV6120_CTRL9_RFSEL_2_MASK) ;
+		else
+			cur = (cur & ~STV6120_CTRL9_RFSEL_1_MASK) | ((in << STV6120_CTRL9_RFSEL_1_SHIFT) & STV6120_CTRL9_RFSEL_1_MASK) ;
+		if (webui_reg_write (1, 0, STV6120_CTRL9, cur) != 0) { snprintf (msg, msglen, "tuner write failed") ; return (-1) ; }
+		snprintf (msg, msglen, "RX%d input = %d", rx, in) ;
+		return (0) ;
+	}
+
+// STV6120: baseband gain (CTRL2 bits 3:0, 0..8 = 0..16 dB)
+	if (webui_api_get (body, "bbgain", val, sizeof(val)))
+	{
+		int g = atoi (val) ;
+		if (g < 0 || g > 8)                         { snprintf (msg, msglen, "bbgain must be 0..8") ; return (-1) ; }
+		if (webui_reg_read (1, 0, STV6120_CTRL2, &cur) != 0) { snprintf (msg, msglen, "tuner read failed") ; return (-1) ; }
+		cur = (cur & ~0x0f) | (g & 0x0f) ;
+		if (webui_reg_write (1, 0, STV6120_CTRL2, cur) != 0) { snprintf (msg, msglen, "tuner write failed") ; return (-1) ; }
+		snprintf (msg, msglen, "baseband gain = %d", g) ;
+		return (0) ;
+	}
+
+// STVVGLNA: gain and AGC mode (lna=0/1 selects the device)
+	if (webui_api_get (body, "lna", val, sizeof(val)))
+	{
+		int n = atoi (val) ;
+		lna_addr = (n == 1) ? NIM_LNA_1_ADDR : NIM_LNA_0_ADDR ;
+
+		if (webui_api_get (body, "gain", val, sizeof(val)))
+		{
+			int g = atoi (val) ;
+			if (g < 0 || g > 31)                    { snprintf (msg, msglen, "gain must be 0..31") ; return (-1) ; }
+			if (webui_reg_read (2, lna_addr, STVVGLNA_REG1, &cur) != 0) { snprintf (msg, msglen, "lna read failed") ; return (-1) ; }
+			cur = (cur & ~STVVGLNA_REG1_VGO_MASK) | (g & STVVGLNA_REG1_VGO_MASK) ;
+			if (webui_reg_write (2, lna_addr, STVVGLNA_REG1, cur) != 0) { snprintf (msg, msglen, "lna write failed") ; return (-1) ; }
+			snprintf (msg, msglen, "LNA%d gain = %d", n, g) ;
+			done = 1 ;
+		}
+		if (webui_api_get (body, "mode", val, sizeof(val)))
+		{
+			int m = atoi (val) ;
+			if (m < 0 || m > 7)                     { snprintf (msg, msglen, "mode must be 0..7") ; return (-1) ; }
+			if (webui_reg_read (2, lna_addr, STVVGLNA_REG2, &cur) != 0) { snprintf (msg, msglen, "lna read failed") ; return (-1) ; }
+			cur = (cur & ~STVVGLNA_REG2_RFAGC_MODE_MASK) | (m & STVVGLNA_REG2_RFAGC_MODE_MASK) ;
+			if (webui_reg_write (2, lna_addr, STVVGLNA_REG2, cur) != 0) { snprintf (msg, msglen, "lna write failed") ; return (-1) ; }
+			snprintf (msg, msglen, "LNA%d mode = %d", n, m) ;
+			done = 1 ;
+		}
+		if (webui_api_get (body, "pref", val, sizeof(val)))
+		{
+			int p = atoi (val) ;
+			if (p < 0 || p > 7)                     { snprintf (msg, msglen, "pref must be 0..7") ; return (-1) ; }
+			if (webui_reg_read (2, lna_addr, STVVGLNA_REG2, &cur) != 0) { snprintf (msg, msglen, "lna read failed") ; return (-1) ; }
+			cur = (cur & ~STVVGLNA_REG2_RFAGC_PREF_MASK) | ((p << STVVGLNA_REG2_RFAGC_PREF_SHIFT) & STVVGLNA_REG2_RFAGC_PREF_MASK) ;
+			if (webui_reg_write (2, lna_addr, STVVGLNA_REG2, cur) != 0) { snprintf (msg, msglen, "lna write failed") ; return (-1) ; }
+			snprintf (msg, msglen, "LNA%d pref = %d", n, p) ;
+			done = 1 ;
+		}
+		if (!done) { snprintf (msg, msglen, "no lna parameter given") ; return (-1) ; }
+		return (0) ;
+	}
+
+	snprintf (msg, msglen, "no known parameter") ;
+	return (-1) ;
 }
 
 
@@ -4666,7 +4844,34 @@ void core1_main()
 		}
 		
 // check for commands from core 0		
-		
+// service a register read/write request from the web UI (Core0)
+
+		if (nimrpc.status == 1)
+		{
+			uint8	v = nimrpc.val ;
+			int8	e = 0 ;
+
+			GLOBALNIM = NIM_A ;
+			if (nimrpc.dev == 0)
+			{
+				if (nimrpc.rw) e = (int8) stv0910_write_reg (nimrpc.reg, v) ;
+				else           e = (int8) stv0910_read_reg  (nimrpc.reg, &v) ;
+			}
+			else if (nimrpc.dev == 1)
+			{
+				if (nimrpc.rw) e = (int8) stv6120_write_reg ((uint8) nimrpc.reg, v) ;
+				else           e = (int8) stv6120_read_reg  ((uint8) nimrpc.reg, &v) ;
+			}
+			else
+			{
+				if (nimrpc.rw) e = (int8) stvvglna_write_reg (nimrpc.addr, (uint8) nimrpc.reg, v) ;
+				else           e = (int8) stvvglna_read_reg  (nimrpc.addr, (uint8) nimrpc.reg, &v) ;
+			}
+			nimrpc.val    = v ;
+			nimrpc.err    = e ;
+			nimrpc.status = 2 ;
+		}
+
 		if (tur01e.status == 1)											// ETH command receiver by core 0 
 		{			
 			turp = &tur01e ;	

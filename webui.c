@@ -70,6 +70,24 @@ static int webui_send_all(const uint8_t *data, int len)
     return sent;
 }
 
+static void webui_drain(void)
+{
+    uint32_t start = to_ms_since_boot(get_absolute_time());
+    while (getSn_TX_FSR(WEBUI_SOCK) < getSn_TxMAX(WEBUI_SOCK))
+    {
+        uint8_t sr = getSn_SR(WEBUI_SOCK);
+        if (sr != SOCK_ESTABLISHED && sr != SOCK_CLOSE_WAIT)
+        {
+            break;
+        }
+        if (to_ms_since_boot(get_absolute_time()) - start > 1000)
+        {
+            break;
+        }
+        sleep_ms(1);
+    }
+}
+
 static void webui_respond(int code, const char *ctype, const char *body, int blen)
 {
     char hdr[176];
@@ -168,7 +186,7 @@ static void webui_handle(char *req)
 
     if (strcmp(method, "GET") == 0 && strcmp(path, "/api/status") == 0)
     {
-        static char json[1400];
+        static char json[3600];
         webui_status_json(json, sizeof(json));
         webui_respond(200, "application/json", json, (int)strlen(json));
         return;
@@ -222,12 +240,53 @@ static void webui_handle(char *req)
         return;
     }
 
+    if (strcmp(method, "POST") == 0 && strcmp(path, "/api/nim") == 0)
+    {
+        int ok = webui_nim_control(params, (int)strlen(params), msg, sizeof(msg));
+        webui_json_ok(ok == 0, msg);
+        return;
+    }
+
+    if (strcmp(method, "GET") == 0 && strcmp(path, "/api/reg") == 0)
+    {
+        int dev = 1, addr = 0, reg = 0, value = -1, err;
+        if (webui_param(params, "dev", val, sizeof(val)))  dev = atoi(val);
+        if (webui_param(params, "addr", val, sizeof(val))) addr = atoi(val);
+        if (webui_param(params, "reg", val, sizeof(val)))  reg = (int)strtol(val, 0, 0);
+        err = webui_reg_read(dev, addr, reg, &value);
+        {
+            static char json[160];
+            snprintf(json, sizeof(json), "{\"dev\":%d,\"reg\":%d,\"val\":\"0x%02X\",\"err\":%d}",
+                     dev, reg, value & 0xff, err);
+            webui_respond(200, "application/json", json, (int)strlen(json));
+        }
+        return;
+    }
+
+    if (strcmp(method, "POST") == 0 && strcmp(path, "/api/reg") == 0)
+    {
+        int dev = 1, addr = 0, reg = 0, value = 0, err;
+        if (webui_param(params, "dev", val, sizeof(val)))   dev = atoi(val);
+        if (webui_param(params, "addr", val, sizeof(val)))  addr = atoi(val);
+        if (webui_param(params, "reg", val, sizeof(val)))   reg = (int)strtol(val, 0, 0);
+        if (webui_param(params, "val", val, sizeof(val)))   value = (int)strtol(val, 0, 0);
+        err = webui_reg_write(dev, addr, reg, value);
+        {
+            static char json[128];
+            snprintf(json, sizeof(json), "{\"dev\":%d,\"reg\":%d,\"err\":%d}", dev, reg, err);
+            webui_respond(err == 0 ? 200 : 400, "application/json", json, (int)strlen(json));
+        }
+        return;
+    }
+
     webui_respond(404, "text/plain", "not found", 9);
 }
 
 void webui_init(void)
 {
-    if (socket(WEBUI_SOCK, Sn_MR_TCP, WEBUI_PORT, SF_IO_NONBLOCK) == WEBUI_SOCK)
+    int8_t r = socket(WEBUI_SOCK, Sn_MR_TCP, WEBUI_PORT, SF_IO_NONBLOCK);
+    int8_t l = -1;
+    if (r == WEBUI_SOCK)
     {
 #if (_WIZCHIP_ == W6100)
         /* W6100 ioLibrary does not apply the non-blocking flag in socket() */
@@ -236,20 +295,78 @@ void webui_init(void)
             ctlsocket(WEBUI_SOCK, CS_SET_IOMODE, &iomode);
         }
 #endif
-        listen(WEBUI_SOCK);
+        l = listen(WEBUI_SOCK);
         webui_running = 1;
     }
+    (void)l;
+}
+
+static void webui_reopen(void)
+{
+    webui_reqlen = 0;
+    if (socket(WEBUI_SOCK, Sn_MR_TCP, WEBUI_PORT, SF_IO_NONBLOCK) == WEBUI_SOCK)
+    {
+#if (_WIZCHIP_ == W6100)
+        uint8_t iomode = SOCK_IO_NONBLOCK;
+        ctlsocket(WEBUI_SOCK, CS_SET_IOMODE, &iomode);
+#endif
+        listen(WEBUI_SOCK);
+    }
+}
+
+/* Non-blocking socket read.
+ *
+ * The ioLibrary recv() in this snapshot returns SOCK_BUSY unconditionally in
+ * non-blocking mode for non-IPv6 chips (the recvsize check is after the
+ * sock_io_mode check), so it can never return data on the W5500.  Read the
+ * RX buffer directly instead. */
+static int32_t webui_socket_recv(uint8_t *buf, uint16_t len)
+{
+#if (_WIZCHIP_ == W5500)
+    uint16_t rsr = (uint16_t)getSn_RX_RSR(WEBUI_SOCK);
+    if (rsr == 0)
+    {
+        return 0;
+    }
+    if (rsr < len)
+    {
+        len = rsr;
+    }
+    wiz_recv_data(WEBUI_SOCK, buf, len);
+    setSn_CR(WEBUI_SOCK, Sn_CR_RECV);
+    while (getSn_CR(WEBUI_SOCK))
+    {
+        ;
+    }
+    return (int32_t)len;
+#else
+    return recv(WEBUI_SOCK, buf, len);
+#endif
 }
 
 void webui_poll(void)
 {
+    static uint8_t  last_sr = 0xFF;
+    static uint32_t sr_since = 0;
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
     if (!webui_running) return;
 
-    switch (getSn_SR(WEBUI_SOCK))
+    uint8_t sr = getSn_SR(WEBUI_SOCK);
+    if (sr != last_sr)
     {
+        last_sr = sr;
+        sr_since = now;
+    }
+
+    switch (sr)
+    {
+        case SOCK_LISTEN:
+            break;
+
         case SOCK_ESTABLISHED:
         {
-            int32_t r = recv(WEBUI_SOCK, webui_req + webui_reqlen,
+            int32_t r = webui_socket_recv(webui_req + webui_reqlen,
                              (uint16_t)(WEBUI_REQMAX - 1 - webui_reqlen));
             if (r > 0)
             {
@@ -259,32 +376,38 @@ void webui_poll(void)
                 {
                     webui_handle((char *)webui_req);
                     webui_reqlen = 0;
+                    webui_drain();
                     disconnect(WEBUI_SOCK);
                 }
             }
             else if (r < 0)
             {
-                webui_reqlen = 0;
-                disconnect(WEBUI_SOCK);
+                setSn_CR(WEBUI_SOCK, Sn_CR_CLOSE);
+            }
+            else if (now - sr_since > 5000)
+            {
+                /* stale / half-open connection: force it down */
+                setSn_CR(WEBUI_SOCK, Sn_CR_CLOSE);
             }
             break;
         }
 
         case SOCK_CLOSE_WAIT:
-            webui_reqlen = 0;
             disconnect(WEBUI_SOCK);
             break;
 
         case SOCK_CLOSED:
         case SOCK_INIT:
-            webui_reqlen = 0;
-            if (socket(WEBUI_SOCK, Sn_MR_TCP, WEBUI_PORT, SF_IO_NONBLOCK) == WEBUI_SOCK)
-            {
-                listen(WEBUI_SOCK);
-            }
+            webui_reopen();
             break;
 
         default:
+            /* FIN_WAIT / CLOSING / LAST_ACK / TIME_WAIT / SYNRECV: if the close
+               stalls, force the socket down so it returns to LISTEN. */
+            if (now - sr_since > 3000)
+            {
+                setSn_CR(WEBUI_SOCK, Sn_CR_CLOSE);
+            }
             break;
     }
 }

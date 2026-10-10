@@ -32,4 +32,12 @@ int webui_tune(int rx, int freq, int sr, int lo, char fplug, char *msg, int msgl
 /* mode: 0 = reboot, 1 = reset settings + reboot, 2 = BOOTSEL. */
 int webui_reboot(int mode, char *msg, int msglen);
 
+/* Raw NIM register access. dev: 0 = STV0910, 1 = STV6120, 2 = STVVGLNA.
+ * addr selects the STVVGLNA I2C address. Return 0 on success. */
+int webui_reg_read (int dev, int addr, int reg, int *val);
+int webui_reg_write(int dev, int addr, int reg, int val);
+
+/* Named tuner / LNA chip controls (form-encoded body). Return 0 on success. */
+int webui_nim_control(const char *body, int len, char *msg, int msglen);
+
 #endif
