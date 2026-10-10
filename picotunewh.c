@@ -4933,10 +4933,12 @@ void core1_main()
 			else
 			{
 				int t ;
-				for (t = 0 ; t < 6 ; t++)
+				nim_set_stv0910_repeaters (false) ;
+				sleep_ms (1) ;
+				nim_set_stv0910_repeaters (true) ;
+				sleep_ms (2) ;
+				for (t = 0 ; t < 10 ; t++)
 				{
-					nim_set_stv0910_repeaters (false) ;		// force a fresh repeater enable
-					nim_set_stv0910_repeaters (true) ;
 					if (nimrpc.rw) e = (int8) stvvglna_write_reg (nimrpc.addr, (uint8) nimrpc.reg, v) ;
 					else           e = (int8) stvvglna_read_reg  (nimrpc.addr, (uint8) nimrpc.reg, &v) ;
 					if (e == 0) break ;
@@ -6144,11 +6146,11 @@ static	uint32			counter ;
 			{
 				if (rcv[rx].antenna == 1)
 				{
-					sprintf (rcv[rx].textinfos[STATUS_ANTENNA], "TOP") ;
+					sprintf (rcv[rx].textinfos[STATUS_ANTENNA], "X") ;
 				}
 				else if (rcv[rx].antenna == 2)
 				{
-					sprintf (rcv[rx].textinfos[STATUS_ANTENNA], "BOT") ;
+					sprintf (rcv[rx].textinfos[STATUS_ANTENNA], "Y") ;
 				}
 									 
 				strcpy (temps, "") ;									// expanded LM info
