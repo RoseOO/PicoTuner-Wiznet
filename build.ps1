@@ -113,7 +113,18 @@ if (-not $Configure) {
 
     $uf2 = Join-Path $Build 'picotunewh.uf2'
     if (Test-Path -LiteralPath $uf2) {
+        # Emit a self-describing copy per variant, e.g. ptwh0v3e-w5500-pico2.uf2,
+        # so the chip/board a given build targets is unambiguous.  The chip and
+        # board are read from the configured cache so they are correct even when
+        # only -BuildDir is supplied for an existing build directory.
+        $chip  = ((Select-String -Path $cache -Pattern '^WIZNET_CHIP:').Line -split '=')[-1]
+        $board = ((Select-String -Path $cache -Pattern '^PICO_BOARD:').Line -split '=')[-1]
+        if ($chip -and $board) {
+            $named = Join-Path $Build ("ptwh0v3e-{0}-{1}.uf2" -f $chip.ToLower(), $board)
+            Copy-Item -LiteralPath $uf2 -Destination $named -Force
+        }
         $item = Get-Item -LiteralPath $uf2
         Write-Host ("`nBuild OK: {0} ({1:N0} bytes)" -f $item.FullName, $item.Length) -ForegroundColor Green
+        if ($named) { Write-Host ("Variant  : {0}" -f $named) -ForegroundColor Green }
     }
 }

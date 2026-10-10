@@ -1179,16 +1179,19 @@ int __in_flash("my_group_name") main()
 	sleep_ms (K) ;	
 	sleep_ms (100) ;	
 
-	if (_WIZCHIP_ == W6100) 
-	{
-		strcpy (versionx3U, "-W6100") ;
-		strcpy (versionx3L, "-w6100") ;
-	}
-	else 
-	{
-		strcpy (versionx3U, "") ;
-		strcpy (versionx3L, "") ;
-	}
+#if (_WIZCHIP_ == W6100)
+	strcpy (versionx3U, "-W6100") ;
+	strcpy (versionx3L, "-w6100") ;
+#elif (_WIZCHIP_ == W5500)
+	strcpy (versionx3U, "-W5500") ;
+	strcpy (versionx3L, "-w5500") ;
+#elif (_WIZCHIP_ == W5100S)
+	strcpy (versionx3U, "-W5100S") ;
+	strcpy (versionx3L, "-w5100s") ;
+#else
+	strcpy (versionx3U, "") ;
+	strcpy (versionx3L, "") ;
+#endif
 
 	printf ("\r\n") ;
 	printf ("ptwh%s%s%s.uf2 is starting \r\n", VERSIONX, VERSIONX2, versionx3L) ;
@@ -1207,6 +1210,16 @@ int __in_flash("my_group_name") main()
 
 #if (_WIZCHIP_ == W6100)
     if (getCIDR() == 0x6100)
+    {
+    	temp = 1 ;
+    }
+#elif (_WIZCHIP_ == W5500)
+    if (getVERSIONR() == 0x04)
+    {
+    	temp = 1 ;
+    }
+#elif (_WIZCHIP_ == W5100S)
+    if (getVER() == 0x51)
     {
     	temp = 1 ;
     }
