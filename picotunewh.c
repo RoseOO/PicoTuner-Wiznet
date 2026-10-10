@@ -69,8 +69,7 @@
 // =======================================================================================================
 */
 		
-#define VERSIONX	"0v3" 		// main version ID
-#define VERSIONX2	"e"			// sub version ID
+#define FWNAME		"m1rxo_v1_2"	// firmware name / version
 
 #define CR		13
 #define LF		10
@@ -1233,7 +1232,7 @@ int __in_flash("my_group_name") main()
 #endif
 
 	printf ("\r\n") ;
-	printf ("ptwh%s%s%s.uf2 is starting \r\n", VERSIONX, VERSIONX2, versionx3L) ;
+	printf (FWNAME "%s.uf2 is starting \r\n", versionx3L) ;
 
 	gpio_put (REGULATOR_ENABLE, 1) ;
 	sleep_ms (250) ;
@@ -1307,13 +1306,13 @@ int __in_flash("my_group_name") main()
 		while (1)
 		{
 #if (_WIZCHIP_ == W6100)
-			printf ("ptwh%s%s%s.uf2: wrong Pico module (CIDR=0x%04X)\r\n", VERSIONX, VERSIONX2, versionx3L, (unsigned) getCIDR() ) ;
+			printf (FWNAME "%s.uf2: wrong Pico module (CIDR=0x%04X)\r\n", versionx3L, (unsigned) getCIDR() ) ;
 #elif (_WIZCHIP_ == W5500)
-			printf ("ptwh%s%s%s.uf2: wrong Pico module (VERSIONR=0x%02X)\r\n", VERSIONX, VERSIONX2, versionx3L, (unsigned) getVERSIONR() ) ;
+			printf (FWNAME "%s.uf2: wrong Pico module (VERSIONR=0x%02X)\r\n", versionx3L, (unsigned) getVERSIONR() ) ;
 #elif (_WIZCHIP_ == W5100S)
-			printf ("ptwh%s%s%s.uf2: wrong Pico module (VERR=0x%02X)\r\n", VERSIONX, VERSIONX2, versionx3L, (unsigned) getVER() ) ;
+			printf (FWNAME "%s.uf2: wrong Pico module (VERR=0x%02X)\r\n", versionx3L, (unsigned) getVER() ) ;
 #else
-			printf ("ptwh%s%s%s.uf2: wrong Pico module\r\n", VERSIONX, VERSIONX2, versionx3L ) ;
+			printf (FWNAME "%s.uf2: wrong Pico module\r\n", versionx3L ) ;
 #endif
 			gpio_put (ZLED, 1) ;
 			set_activity_led	(1, ON) ;  				 
@@ -1391,7 +1390,7 @@ int __in_flash("my_group_name") main()
 	xprintf ("\r\n") ;
     xprintf ("=======================================================================================================\r\n") ;                         
     xprintf ("=======================================================================================================\r\n") ;                         
-    sprintf (temps, "PicoTuner Dual Channel Digital TV Receiver - WinterHill mode - Version=ptwh%s%s%s.uf2 \r\n", VERSIONX, VERSIONX2, versionx3L) ;
+    sprintf (temps, "PicoTuner Dual Channel Digital TV Receiver - WinterHill mode - Version=" FWNAME "%s.uf2 \r\n", versionx3L) ;
     xprintf (temps) ;
     xprintf ("=======================================================================================================\r\n") ;                         
 
@@ -1886,7 +1885,7 @@ void form_broadcast_message (char *buff)
 	}
 	sprintf (buff+strlen(buff), "\r\n") ;
 	
-	sprintf (buff+strlen(buff), "        Software   ptwh%s%s%s.uf2 \r\n", VERSIONX, VERSIONX2, versionx3L) ;
+		sprintf (buff+strlen(buff), "        Software   " FWNAME "%s.uf2 \r\n", versionx3L) ;
 	
 	sprintf (buff+strlen(buff), "            Mode   WinterHill \r\n") ;	
 
@@ -2472,12 +2471,12 @@ void webui_status_json (char *out, int outlen)
 		netinfo.mac[0], netinfo.mac[1], netinfo.mac[2], netinfo.mac[3], netinfo.mac[4], netinfo.mac[5]) ;
 
 	n += snprintf (out + n, outlen - n,
-		"{\"version\":\"ptwh%s%s%s\",\"uptime\":%u,"
+		"{\"version\":\"" FWNAME "%s\",\"uptime\":%u,"
 		"\"mac\":\"%s\",\"ip\":\"%s\",\"sn\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
 		"\"dhcp\":%d,\"dhcp_status\":\"%s\",\"baseipport\":%u,\"link\":%d,"
 		"\"lnb_x\":{\"present\":%d,\"state\":\"%s\",\"value\":%d},"
 		"\"lnb_y\":{\"present\":%d,\"state\":\"%s\",\"value\":%d},\"rx\":[",
-		VERSIONX, VERSIONX2, versionx3L,
+		versionx3L,
 		(unsigned)(monotime_ms () / 1000),
 		smac, sip, ssn, sgw, sdns,
 		(netinfo.dhcp == NETINFO_DHCP) ? 1 : 0,
@@ -6278,7 +6277,7 @@ static	uint32			counter ;
 		}
 
 		strcpy (output, "") ;
-        sprintf (output+strlen(output), " PICOTUNER (WH mode) Version=ptwh%s%s%s.uf2", VERSIONX, VERSIONX2, versionx3L) ;
+		sprintf (output+strlen(output), " PICOTUNER (WH mode) Version=" FWNAME "%s.uf2", versionx3L) ;
    		sprintf (output+strlen(output), "  RunTime=%.0fs", (float)monotime_ms() / 1000) ;
 		sprintf (output+strlen(output), "  BasePort=%d", baseipport) ;
 		sprintf (output+strlen(output), "  MAC=") ;
