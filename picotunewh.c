@@ -1199,31 +1199,63 @@ int __in_flash("my_group_name") main()
 	gpio_put (REGULATOR_ENABLE, 1) ;
 	sleep_ms (250) ;
 
-	gpio_put (WIZRESET, 1) ; 											// enable WIZ chip
-	sleep_ms (100) ;
-    wizchip_spi_initialize() ;
-    wizchip_cris_initialize() ;
-    wizchip_reset() ;
-    wizchip_initialize_ewj() ;
+	// Bring up the WIZnet chip with a clean hardware reset.  Chip select is
+	// driven high and the active-low reset pulsed so the chip starts in a
+	// known state even after a warm (non power) reset, then we wait for it
+	// to become ready before the first SPI access.  The whole bring-up and
+	// detection is retried in case the first access races chip startup.
+	gpio_init 		(PIN_CS) ;
+	gpio_set_dir 	(PIN_CS, GPIO_OUT) ;
+	gpio_put 		(PIN_CS, 1) ;
 
 	temp = 0 ;
 
+	for (z = 0 ; z < 3 && temp == 0 ; z++)
+	{
+		gpio_put (WIZRESET, 0) ; 										// assert reset
+		sleep_ms (50) ;
+		gpio_put (WIZRESET, 1) ; 										// release reset
+		sleep_ms (200) ;
+
+		wizchip_spi_initialize() ;
+		wizchip_cris_initialize() ;
+		wizchip_reset() ;
+		wizchip_initialize_ewj() ;
+
+		sleep_ms (50) ;
+
 #if (_WIZCHIP_ == W6100)
-    if (getCIDR() == 0x6100)
-    {
-    	temp = 1 ;
-    }
+		r = getCIDR() ;
+		if (r == 0x6100)
+		{
+			temp = 1 ;
+		}
+		else
+		{
+			printf ("WIZnet CIDR = 0x%04X (expect 0x6100)\r\n", (unsigned) r) ;
+		}
 #elif (_WIZCHIP_ == W5500)
-    if (getVERSIONR() == 0x04)
-    {
-    	temp = 1 ;
-    }
+		r = getVERSIONR() ;
+		if (r == 0x04)
+		{
+			temp = 1 ;
+		}
+		else
+		{
+			printf ("WIZnet VERSIONR = 0x%02X (expect 0x04)\r\n", (unsigned) r) ;
+		}
 #elif (_WIZCHIP_ == W5100S)
-    if (getVER() == 0x51)
-    {
-    	temp = 1 ;
-    }
+		r = getVER() ;
+		if (r == 0x51)
+		{
+			temp = 1 ;
+		}
+		else
+		{
+			printf ("WIZnet VERR = 0x%02X (expect 0x51)\r\n", (unsigned) r) ;
+		}
 #endif
+	}
 
 	gpio_put (WIZRESET, 0) ; 				// disable WIZ chip
 
@@ -1235,7 +1267,15 @@ int __in_flash("my_group_name") main()
 
 		while (1)
 		{
+#if (_WIZCHIP_ == W6100)
+			printf ("ptwh%s%s%s.uf2: wrong Pico module (CIDR=0x%04X)\r\n", VERSIONX, VERSIONX2, versionx3L, (unsigned) getCIDR() ) ;
+#elif (_WIZCHIP_ == W5500)
+			printf ("ptwh%s%s%s.uf2: wrong Pico module (VERSIONR=0x%02X)\r\n", VERSIONX, VERSIONX2, versionx3L, (unsigned) getVERSIONR() ) ;
+#elif (_WIZCHIP_ == W5100S)
+			printf ("ptwh%s%s%s.uf2: wrong Pico module (VERR=0x%02X)\r\n", VERSIONX, VERSIONX2, versionx3L, (unsigned) getVER() ) ;
+#else
 			printf ("ptwh%s%s%s.uf2: wrong Pico module\r\n", VERSIONX, VERSIONX2, versionx3L ) ;
+#endif
 			gpio_put (ZLED, 1) ;
 			set_activity_led	(1, ON) ;  				 
 			set_activity_led	(2, ON) ;  				 
@@ -3772,6 +3812,7 @@ int dhcp_sending_request_state_7 (int command)
 {
 	int		status ;
 	uint8	*p ;
+	uint8	nullx [4] = {0,0,0,0} ;
 	
 	memcpy (&dhcprequest.transaction_id, dhcpdisc.transaction_id, 4) ;
 
@@ -3814,7 +3855,15 @@ int dhcp_sending_request_state_7 (int command)
 	*p++ = 33 ;								
 	*p++ = 0xff ;							// end list
 
-	status = sendto (dhcp_socket, (void*) &dhcprequest, sizeof(dhcprequest), netinfo.sv, DHCPOUT_PORT) ;
+// The client has no usable IP yet in the SELECTING state, so a unicast to the
+// server can be dropped (no ARP entry / 0.0.0.0 source).  Broadcast the
+// REQUEST from a 0.0.0.0 source, as for DISCOVER.  The server-identifier
+// option (54) above keeps it a valid SELECTING request rather than INIT-REBOOT.
+	NETUNLOCK() ;
+    setSIPR (nullx) ;
+	status = sendto (dhcp_socket, (void*) &dhcprequest, sizeof(dhcprequest), broadcast_address, DHCPOUT_PORT) ;
+	setSIPR (netinfo.ip) ;
+	NETLOCK() ;
 	
 	if (dhcp_debug)
 	{
@@ -3937,16 +3986,13 @@ int dhcp_waiting_ack_state_3 (int command)
 			}	
 			else 
 			{
+				// A packet for this transaction that is neither ACK nor NAK
+				// (typically a retransmitted OFFER).  Ignore it and keep
+				// waiting for the ACK rather than restarting the exchange.
 				if (dhcp_debug)
 				{
-					printf ("DHCP: unknown response \r\n") ;
-					printf ("DHCP: --- FAILURE --- \r\n") ;
-					printf ("DHCP: waiting to retry \r\n") ;
+					printf ("DHCP: ignoring message type %d while waiting for ACK \r\n", mt[2]) ;
 				}
-				strcpy (dhcp_status_message, "FAILURE") ;
-				dhcp_mark_time = dhcp_current_time ;
-				dhcp_machine_state = DHCP_WAITING_TO_RETRY_STATE_4 ;
-				return (DHCP_FAIL) ;
 			}
 		}	
 		}
