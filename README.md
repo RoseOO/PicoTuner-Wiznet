@@ -88,9 +88,12 @@ Full reference: [`docs/API.md`](docs/API.md).
 
 ## Building
 
+A complete, from-scratch Windows environment (with download links for every
+tool) is in **[`docs/BUILD_WINDOWS.md`](docs/BUILD_WINDOWS.md)**.
+
 Requires the Raspberry Pi Pico SDK, the WIZnet-PICO-C sources, CMake/Ninja and
-the ARM GNU toolchain. See `build.ps1` (Windows) — the defaults build the
-W5500-EVB-Pico2 (RP2350). Override per invocation:
+the ARM GNU toolchain. `build.ps1` defaults to the W5500-EVB-Pico2 (RP2350);
+override per invocation:
 
 ```powershell
 # default: pico2 / W5500 / W5500_EVB_PICO2
