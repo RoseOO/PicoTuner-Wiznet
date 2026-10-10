@@ -2426,6 +2426,17 @@ static const char *webui_api_lnbtoken (int state)
 	}
 }
 
+// map a live LNB state string back to the LNB_* code
+static int webui_api_lnbvalue (const char *s)
+{
+	if (!s) return (LNB_OFF) ;
+	if (strcmp (s, "LO")  == 0) return (LNB_13V) ;
+	if (strcmp (s, "HI")  == 0) return (LNB_18V) ;
+	if (strcmp (s, "LOT") == 0) return (LNB_13V_22K) ;
+	if (strcmp (s, "HIT") == 0) return (LNB_18V_22K) ;
+	return (LNB_OFF) ;
+}
+
 // queue a WinterHill command to core 1 (same channel as the UDP commands)
 
 static int webui_api_queue (const char *cmd, int rx)
@@ -2464,8 +2475,8 @@ void webui_status_json (char *out, int outlen)
 		"{\"version\":\"ptwh%s%s%s\",\"uptime\":%u,"
 		"\"mac\":\"%s\",\"ip\":\"%s\",\"sn\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
 		"\"dhcp\":%d,\"dhcp_status\":\"%s\",\"baseipport\":%u,\"link\":%d,"
-		"\"lnb_x\":{\"present\":%d,\"state\":\"%s\"},"
-		"\"lnb_y\":{\"present\":%d,\"state\":\"%s\"},\"rx\":[",
+		"\"lnb_x\":{\"present\":%d,\"state\":\"%s\",\"value\":%d},"
+		"\"lnb_y\":{\"present\":%d,\"state\":\"%s\",\"value\":%d},\"rx\":[",
 		VERSIONX, VERSIONX2, versionx3L,
 		(unsigned)(monotime_ms () / 1000),
 		smac, sip, ssn, sgw, sdns,
@@ -2474,9 +2485,11 @@ void webui_status_json (char *out, int outlen)
 		(unsigned) baseipport,
 		get_link_state (),
 		vgxpresent ? 1 : 0,
-		rcv[0].textinfos [STATUS_VGX_STATE][0] ? rcv[0].textinfos [STATUS_VGX_STATE] : "-",
+		rcv[0].textinfos [STATUS_VGX_STATE][0] ? rcv[0].textinfos [STATUS_VGX_STATE] : "OFF",
+		webui_api_lnbvalue (rcv[0].textinfos [STATUS_VGX_STATE]),
 		vgypresent ? 1 : 0,
-		rcv[0].textinfos [STATUS_VGY_STATE][0] ? rcv[0].textinfos [STATUS_VGY_STATE] : "-") ;
+		rcv[0].textinfos [STATUS_VGY_STATE][0] ? rcv[0].textinfos [STATUS_VGY_STATE] : "OFF",
+		webui_api_lnbvalue (rcv[0].textinfos [STATUS_VGY_STATE])) ;
 
 	for (rx = 1 ; rx <= MAXRECEIVERS ; rx++)
 	{
