@@ -2799,8 +2799,70 @@ int webui_nim_control (const char *body, int len, char *msg, int msglen)
 		return (0) ;
 	}
 
+// 22 kHz tone (same routing as the LNB: rx1 -> P2, rx2 -> P1)
+	if (webui_api_get (body, "tone", val, sizeof(val)))
+	{
+		int on = atoi (val) ;
+		int reg = (rx == 1) ? 0xf742 : 0xf702 ;
+		webui_reg_write (0, 0, reg, on ? 0 : 2) ;
+		snprintf (msg, msglen, "RX%d 22kHz %s", rx, on ? "on" : "off") ;
+		return (0) ;
+	}
+
+// demod roll-off control bits (advanced): rx1 -> demod P2, rx2 -> demod P1
+	if (webui_api_get (body, "rolloff", val, sizeof(val)))
+	{
+		int v = atoi (val) ;
+		int reg = (rx == 1) ? RSTV0910_P2_DEMOD : RSTV0910_P1_DEMOD ;
+		if (v < 0 || v > 3)                 { snprintf (msg, msglen, "rolloff must be 0..3") ; return (-1) ; }
+		if (webui_reg_read (0, 0, reg, &cur) != 0) { snprintf (msg, msglen, "demod read failed") ; return (-1) ; }
+		cur = (cur & ~0x03) | (v & 0x03) ;
+		if (webui_reg_write (0, 0, reg, cur) != 0) { snprintf (msg, msglen, "demod write failed") ; return (-1) ; }
+		snprintf (msg, msglen, "RX%d roll-off control = %d", rx, v) ;
+		return (0) ;
+	}
+
 	snprintf (msg, msglen, "no known parameter") ;
 	return (-1) ;
+}
+
+
+// send a DiSEqC message (experimental).  rx1 drives LNB X (demod P2),
+// rx2 drives LNB Y (demod P1), matching the 22 kHz tone routing.
+int webui_diseqc (int rx, const char *hex, char *msg, int msglen)
+{
+	uint8	data [16] ;
+	int		len = 0, i ;
+	uint16	reg_cfg, reg_bytes, reg_fifo ;
+
+	if (rx != 1 && rx != 2)                  { snprintf (msg, msglen, "invalid receiver") ; return (-1) ; }
+	if (!hex)                                { snprintf (msg, msglen, "no data") ; return (-1) ; }
+
+	if (rx == 1) { reg_cfg = 0xf742 ; reg_bytes = 0xf744 ; reg_fifo = 0xf745 ; }
+	else         { reg_cfg = 0xf702 ; reg_bytes = 0xf704 ; reg_fifo = 0xf705 ; }
+
+	i = 0 ;
+	while (hex[i] && len < (int) sizeof(data))
+	{
+		char b [3] ;
+		if (hex[i] == ' ' || hex[i] == ',' || hex[i] == ':') { i++ ; continue ; }
+		if (!hex[i+1]) break ;
+		b[0] = hex[i] ; b[1] = hex[i+1] ; b[2] = 0 ;
+		data[len++] = (uint8) strtol (b, 0, 16) ;
+		i += 2 ;
+	}
+	if (len == 0)                            { snprintf (msg, msglen, "no data") ; return (-1) ; }
+
+// best-effort transmit through the STV0910 DiSEqC modem
+	webui_reg_write (0, 0, reg_cfg,   0x00) ;			// modulation mode
+	webui_reg_write (0, 0, reg_bytes, (int) len) ;		// byte count
+	for (i = 0 ; i < len ; i++)
+	{
+		webui_reg_write (0, 0, reg_fifo, data[i]) ;
+	}
+
+	snprintf (msg, msglen, "DiSEqC %d byte(s) sent on RX%d (experimental)", len, rx) ;
+	return (0) ;
 }
 
 
@@ -4864,8 +4926,16 @@ void core1_main()
 			}
 			else
 			{
-				if (nimrpc.rw) e = (int8) stvvglna_write_reg (nimrpc.addr, (uint8) nimrpc.reg, v) ;
-				else           e = (int8) stvvglna_read_reg  (nimrpc.addr, (uint8) nimrpc.reg, &v) ;
+				int t ;
+				for (t = 0 ; t < 6 ; t++)
+				{
+					nim_set_stv0910_repeaters (false) ;		// force a fresh repeater enable
+					nim_set_stv0910_repeaters (true) ;
+					if (nimrpc.rw) e = (int8) stvvglna_write_reg (nimrpc.addr, (uint8) nimrpc.reg, v) ;
+					else           e = (int8) stvvglna_read_reg  (nimrpc.addr, (uint8) nimrpc.reg, &v) ;
+					if (e == 0) break ;
+					sleep_ms (2) ;
+				}
 			}
 			nimrpc.val    = v ;
 			nimrpc.err    = e ;

@@ -40,4 +40,7 @@ int webui_reg_write(int dev, int addr, int reg, int val);
 /* Named tuner / LNA chip controls (form-encoded body). Return 0 on success. */
 int webui_nim_control(const char *body, int len, char *msg, int msglen);
 
+/* Send a DiSEqC message (hex string) on receiver rx (1 or 2). */
+int webui_diseqc(int rx, const char *hex, char *msg, int msglen);
+
 #endif

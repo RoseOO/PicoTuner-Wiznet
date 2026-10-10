@@ -247,6 +247,19 @@ static void webui_handle(char *req)
         return;
     }
 
+    if (strcmp(method, "POST") == 0 && strcmp(path, "/api/diseqc") == 0)
+    {
+        int  rx = 1;
+        char data[80] = {0};
+        if (webui_param(params, "rx", val, sizeof(val)))   rx = atoi(val);
+        if (webui_param(params, "data", data, sizeof(data)) == 0) data[0] = 0;
+        {
+            int ok = webui_diseqc(rx, data, msg, sizeof(msg));
+            webui_json_ok(ok == 0, msg);
+        }
+        return;
+    }
+
     if (strcmp(method, "GET") == 0 && strcmp(path, "/api/reg") == 0)
     {
         int dev = 1, addr = 0, reg = 0, value = -1, err;
